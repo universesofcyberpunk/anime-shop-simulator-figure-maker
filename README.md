@@ -15,12 +15,12 @@ mod that loads the packs in the game (`FigureShop/`, C#).
 
 ## Install the ready exe
 
-1. Download **FigureMaker.exe** from the [Releases](../../releases) page (or from Nexus Mods).
+1. Download **FigureMaker.exe** from the [Releases](../../releases) page (or from [Nexus Mods](https://www.nexusmods.com/animeshopsimulator/mods/82)).
 2. Put it in a folder you can write to, e.g. `Desktop\FigureMaker` (results are written next to the exe; Program Files does not work).
 3. Drag a model onto `FigureMaker.exe`, or double-click it for the batch window.
 4. Copy the folder from `out\<name>` into the game's `UserData\FigureShop` folder and restart the game.
 
-In the game you need MelonLoader 0.7.x, **FigureShop 1.3.0+** and **[Fabianens Mod Market](https://github.com/universesofcyberpunk/anime-shop-simulator-mod-market) 1.4.0+**.
+In the game you need MelonLoader 0.7.x, **[FigureShop](https://www.nexusmods.com/animeshopsimulator/mods/80) 1.3.0+** (source in [`FigureShop/`](FigureShop)) and **[Fabianens Mod Market](https://github.com/universesofcyberpunk/anime-shop-simulator-mod-market) 1.4.0+**.
 FBX / OBJ / BLEND input also needs [Blender 4.x](https://www.blender.org/download/) installed (GLB, GLTF and zip need nothing).
 If Windows SmartScreen warns, click *More info > Run anyway* (the exe is not signed).
 
@@ -60,7 +60,7 @@ next to the exe on first use and are not part of the repository.
 `FigureShop/` is the in-game half: a MelonLoader 0.7.x mod (net6.0, IL2CPP) that reads every pack folder in
 `UserData\FigureShop`, registers each figure as a loose and a boxed product with its own licence on the
 **[Fabianens Mod Market](https://github.com/universesofcyberpunk/anime-shop-simulator-mod-market)** MODS screen, and builds the 3D model from `model.skin` at the pose frame in `figure.json`.
-Players normally get the ready `FigureShop.dll` from Nexus Mods; build it yourself like this:
+Players normally get the ready `FigureShop.dll` from [Nexus Mods](https://www.nexusmods.com/animeshopsimulator/mods/80) or the [Releases](../../releases) page; build it yourself like this:
 
 1. Install the [.NET 6 SDK or newer](https://dotnet.microsoft.com/download) and run the game once with MelonLoader 0.7.x
    (that generates `MelonLoader\Il2CppAssemblies`, which the project references).
@@ -97,6 +97,22 @@ The game's own DLLs are not in this repository; they come from your install.
 
 Only share figure packs of models whose licence allows it; the tool copies the model's credits into `license.txt`.
 Code licence (Figure Maker and FigureShop): MIT, see `LICENSE`. If you reuse the code, credit **Fabianens**.
+
+## More by Fabianens
+
+| Project | What it does | Links |
+|---|---|---|
+| **Figure Maker + FigureShop** (this repository) | turn any 3D model into a shop figure (app) and the mod that sells it | [GitHub](https://github.com/universesofcyberpunk/anime-shop-simulator-figure-maker) · [Nexus](https://www.nexusmods.com/animeshopsimulator/mods/82) |
+| **Fabianens Mod Market** | MODS screen on the shop computer; API for other mods to list their items | [GitHub](https://github.com/universesofcyberpunk/anime-shop-simulator-mod-market) · [Nexus](https://www.nexusmods.com/animeshopsimulator/mods/31) |
+| **Mod Manager** | build / test / package / publish state of all your mods (tool for modders) | [GitHub](https://github.com/universesofcyberpunk/anime-shop-simulator-mod-manager) |
+| **Video TV** | wall TVs that play your own videos | [GitHub](https://github.com/universesofcyberpunk/anime-shop-simulator-video-tv) · [Nexus](https://www.nexusmods.com/animeshopsimulator/mods/90) |
+| **Graphics Plus** | URP colour, anti-aliasing and SSAO presets, an ENB alternative | [GitHub](https://github.com/universesofcyberpunk/anime-shop-simulator-GraphicsPlus) · [Nexus](https://www.nexusmods.com/animeshopsimulator/mods/95) |
+| **Free Placement** | place, stack, resize and tilt items anywhere | [GitHub](https://github.com/universesofcyberpunk/anime-shop-simulator-FreePlacement) · [Nexus](https://www.nexusmods.com/animeshopsimulator/mods/47) |
+| **FBS Body** | play as your own VRoid character, with FBS Studio | [GitHub](https://github.com/universesofcyberpunk/anime-shop-simulator-FBSBody) · [Nexus](https://www.nexusmods.com/animeshopsimulator/mods/45) |
+| **Mod Settings Manager** | the F10 in-game settings menu used by most of these mods | [Nexus](https://www.nexusmods.com/animeshopsimulator/mods/40) |
+| **FTPV - First and Third Person View** | see your own body in first person (needed by FBS Body) | [Nexus](https://www.nexusmods.com/animeshopsimulator/mods/32) |
+
+All mods: [Fabianens on Nexus Mods](https://www.nexusmods.com/profile/Fabianens/mods?gameId=10172)
 
 ---
 
