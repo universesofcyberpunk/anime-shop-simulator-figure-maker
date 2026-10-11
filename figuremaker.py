@@ -1,0 +1,1273 @@
+# Figure Maker - FigureShop figur paketi uretici (Fabianens)
+# glTF / GLB / Sketchfab zip  ->  <Ad>\ klasoru: model.skin + dokular + figure.json + icon.png + box_icon.png + license.txt
+# Klasor UserData\FigureShop\ icine konunca oyunda Fabi Figures lisansinin altinda acik + kutulu figur olarak cikar.
+#
+# Kullanim:  python figuremaker.py                      (toplu pencere: surukle-birak / coklu secim, sirayla cevirir)
+#            python figuremaker.py <model.glb|.gltf|.zip> [--name Ad] [--en "English name"] [--tr "Türkçe ad"]
+#                                  [--pose AnimasyonAdi] [--pose-time 0] [--budget 60000] [--yaw 25] [--install]
+import sys, os, re, json, shutil, struct, zipfile, glob, subprocess, argparse, traceback
+FROZEN = getattr(sys, 'frozen', False)
+HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))          # betikler / sablonlar
+BASE = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))   # out\, work\
+sys.path.insert(0, os.path.join(HERE, 'tools'))
+import numpy as np
+from PIL import Image
+import conv, gl, preview, standalone
+
+def _find_game():
+    d = BASE
+    for _ in range(6):
+        if os.path.exists(os.path.join(d, 'Anime Shop Simulator.exe')): return d
+        d = os.path.dirname(d)
+    for d in (r"C:\Program Files (x86)\Steam\steamapps\common\Anime Shop Simulator", r"D:\SteamLibrary\steamapps\common\Anime Shop Simulator"):
+        if os.path.exists(os.path.join(d, 'Anime Shop Simulator.exe')): return d
+    return None
+GAME = _find_game() or BASE
+USERDATA = os.path.join(GAME, 'UserData', 'FigureShop')
+BLENDERS = [r"C:\Program Files\Blender Foundation\Blender 4.3\blender.exe"] + sorted(glob.glob(r"C:\Program Files\Blender Foundation\Blender *\blender.exe"), reverse=True)
+BLENDER = next((b for b in BLENDERS if os.path.exists(b)), None)
+
+
+LOG_SINK = None   # kuyruk penceresi acikken satirlari oraya da gonderir (is parcacigindan guvenli: queue.Queue.put)
+def log(*a):
+    print('[FigureMaker]', *a, flush=True)
+    if LOG_SINK: LOG_SINK(' '.join(str(x) for x in a))
+
+
+def folder_name(s):
+    s = re.sub(r'[^A-Za-z0-9_\- ]+', '', s).strip()
+    s = re.sub(r'[\s\-]+', '_', s)
+    return s[:40] or 'Figure'
+
+
+def pretty(s):
+    s = re.sub(r'[_\-]+', ' ', s).strip()
+    return ' '.join(w[:1].upper() + w[1:] for w in s.split())
+
+
+def find_source(path, work):
+    """zip ise ac; FBX / OBJ / BLEND ise Blender ile GLB'ye cevir; glb/gltf yolunu dondur"""
+    if os.path.splitext(path)[1].lower() in ('.fbx', '.obj', '.blend'):
+        if not BLENDER: raise FMError('err_blender')
+        out = os.path.join(work, 'src.glb')
+        r = subprocess.run([BLENDER, '-b', '--factory-startup', '-P', os.path.join(HERE, 'tools', 'fbx2glb.py'), '--', path, out],
+                           capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        if 'FBX2GLB ok' not in r.stdout or not os.path.exists(out): raise FMError('err_fbx', r.stdout[-1200:] + r.stderr[-800:])
+        lp = os.path.join(os.path.dirname(path), 'license.txt')
+        if os.path.exists(lp): shutil.copy(lp, os.path.join(work, 'license.txt'))
+        log('FBX/OBJ/BLEND -> GLB:', out)
+        return out
+    if path.lower().endswith('.zip'):
+        d = os.path.join(work, 'src'); shutil.rmtree(d, True); os.makedirs(d)
+        zipfile.ZipFile(path).extractall(d)
+        c = glob.glob(d + '/**/*.gltf', recursive=True) + glob.glob(d + '/**/*.glb', recursive=True)
+        if not c: raise FMError('err_zip')
+        return c[0]
+    return path
+
+
+def tri_count(g):
+    t = 0
+    for i in gl.scene_nodes(g.j):
+        n = g.j['nodes'][i]
+        if 'mesh' in n:
+            for pr in g.j['meshes'][n['mesh']]['primitives']:
+                if pr.get('mode', 4) != 4: continue
+                a = g.j['accessors'][pr['indices']]['count'] if 'indices' in pr else g.j['accessors'][pr['attributes']['POSITION']]['count']
+                t += a // 3
+    return t
+
+
+def credits(g, src):
+    """yazar / kaynak / lisans: glb asset.extras (Sketchfab) ya da license.txt"""
+    ex = (g.j.get('asset') or {}).get('extras') or {}
+    lic = getattr(g, 'license', '') or ''
+    if not lic:
+        lp = os.path.join(os.path.dirname(src), 'license.txt')
+        if os.path.exists(lp): lic = open(lp, encoding='utf-8', errors='ignore').read()
+    info = dict(title=str(ex.get('title') or ''), author=str(ex.get('author') or ''), source=str(ex.get('source') or ''), license=str(ex.get('license') or ''))
+    if lic:
+        m = re.search(r'model[^"]*"([^"]+)"', lic, re.I)
+        if m and not info['title']: info['title'] = m.group(1)
+        m = re.search(r'\(https?://sketchfab\.com/3d-models/[^)]+\)', lic)
+        if m and not info['source']: info['source'] = m.group(0)[1:-1]
+        m = re.search(r'by\s+(.+?)\s*\(https?://sketchfab\.com/(?!3d-models)', lic)
+        if m and not info['author']: info['author'] = m.group(1).strip()
+        m = re.search(r'(CC-BY[-A-Z0-9.]*|CC0[-0-9.]*|Standard license|Free Standard|Editorial)', lic, re.I)
+        if m and not info['license']: info['license'] = m.group(1)
+    if not lic and any(info.values()):
+        lic = f'Model: "{info["title"]}" ({info["source"]}) by {info["author"]}, {info["license"]}'
+    return info, lic
+
+
+def decimate(src, work, budget, anim):
+    """poligon butcesini asarsa Blender ile azalt (figur rafta cok sayida durur)"""
+    if not BLENDER: log('Blender yok, poligon azaltma atlandi'); return src, None
+    if anim:
+        out = os.path.join(work, 'geo.glb')
+        r = subprocess.run([BLENDER, '-b', '--factory-startup', '-P', os.path.join(HERE, 'tools', 'bprep_geo.py'), '--', src, out, str(budget)],
+                           capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        line = [l for l in r.stdout.splitlines() if l.startswith('BPREP')]
+        if not line: raise FMError('err_decimate', r.stdout[-1200:] + r.stderr[-800:])
+        log('poligon:', json.loads(line[0][6:]))
+        return src, out
+    out = os.path.join(work, 'dec.glb')
+    r = subprocess.run([BLENDER, '-b', '--factory-startup', '-P', os.path.join(HERE, 'tools', 'bprep.py'), '--', src, out, str(budget), '0'],
+                       capture_output=True, text=True, encoding='utf-8', errors='ignore')
+    line = [l for l in r.stdout.splitlines() if l.startswith('BPREP')]
+    if not line: raise FMError('err_decimate', r.stdout[-1200:] + r.stderr[-800:])
+    log('poligon:', json.loads(line[0][6:]))
+    return out, None
+
+
+def render_icon(out, work, yaw, front=None, frame=0):
+    """posed model -> icon.png (256, seffaf), yerlesik cizici (Blender gerekmez)"""
+    try:
+        return standalone.render_icon(out, os.path.join(out, 'icon.png'), yaw, front=front, frame=frame)
+    except Exception as e:
+        log('ikon cizilemedi:', e); return False
+
+
+def render_icon_blender(out, work, yaw):
+    """(eski) posed model -> OBJ -> Blender -> icon.png"""
+    if not BLENDER: return False
+    obj = os.path.join(work, 'prev.obj')
+    preview.run(out, obj, 0, 0)
+    r = subprocess.run([BLENDER, '-b', '--factory-startup', '-P', os.path.join(HERE, 'tools', 'brender.py'), '--', obj,
+                        os.path.join(work, 'big.png'), os.path.join(out, 'icon.png'), str(yaw)],
+                       capture_output=True, text=True, encoding='utf-8', errors='ignore')
+    ok = 'BRENDER ok' in r.stdout and os.path.exists(os.path.join(out, 'icon.png'))
+    if not ok: log('ikon cizilemedi:', r.stdout[-600:], r.stderr[-400:])
+    return ok
+
+
+def box_template():
+    for d in (os.path.join(BASE, 'templates'), os.path.join(HERE, 'templates'), USERDATA):
+        p = os.path.join(d, 'box_template.png'); j = os.path.join(d, 'box_template.json')
+        if os.path.exists(p) and os.path.exists(j):
+            r = json.load(open(j))
+            if r: return p, r
+    return None, None
+
+
+def make_box_icon(out):
+    """oyunun hediye kutusu (box_template.png, FigureShop oyunda bir kez uretir) + figur resmi kutunun icine"""
+    tp, rect = box_template()
+    icon = os.path.join(out, 'icon.png')
+    if not tp or not os.path.exists(icon):
+        log('kutu sablonu yok: box_icon.png uretilmedi (oyun ilk acilista kendisi cizer; FigureShop bir kez acilinca sablon olusur)')
+        return False
+    box = Image.open(tp).convert('RGBA'); W, H = box.size
+    fig = Image.open(icon).convert('RGBA')
+    bb = fig.getbbox()
+    if bb: fig = fig.crop(bb)
+    x0, y0, x1, y1 = rect['x0'] * W, rect['y0'] * H, rect['x1'] * W, rect['y1'] * H
+    rw, rh = max(1, x1 - x0), max(1, y1 - y0)
+    s = min(rh / fig.height, rw * 1.3 / fig.width)
+    fig = fig.resize((max(1, int(fig.width * s)), max(1, int(fig.height * s))), Image.LANCZOS)
+    px = int((x0 + x1) / 2 - fig.width / 2); py = int(y1 - fig.height)
+    layer = Image.new('RGBA', box.size, (0, 0, 0, 0)); layer.paste(fig, (px, py), fig)
+    Image.alpha_composite(box, layer).save(os.path.join(out, 'box_icon.png'))
+    return True
+
+
+# ---------------- dil dosyalari / language files ----------------
+# exe'nin yanindaki lang\<kod>.json; ilk calismada en.json ve tr.json yazilir, sonra hep oradan okunur.
+# Yeni dil: lang\de.json gibi bir dosya ekle ("_name": "Deutsch"); dil listesi her acilista klasoru yeniden tarar.
+LANG_DIR = os.path.join(BASE, 'lang')
+SETTINGS = os.path.join(BASE, 'settings.json')
+STRINGS = {
+    'en': {
+        '_name': 'English',
+        'language': 'Language',
+        'app_sub': 'Turns 3D models into FigureShop figures',
+        'hint': 'Drop 3D models or folders onto this window, or use Add files. Press Start and they are converted one after another.',
+        'drop_here': 'Drop models here\n.glb  .gltf  .zip  .fbx  .obj  .blend',
+        'col_model': 'Model', 'col_folder': 'Output folder', 'col_status': 'Status',
+        'st_wait': 'Waiting', 'st_edit': 'Editing', 'st_run': 'Converting…', 'st_done': 'Done', 'st_err': 'Error',
+        'btn_add': 'Add files…', 'btn_add_folder': 'Add folder…', 'btn_edit': 'Edit…', 'btn_remove': 'Remove',
+        'btn_retry': 'Retry', 'btn_clear': 'Clear finished', 'btn_out': 'Open output folder', 'btn_start': 'Start',
+        'btn_running': 'Converting…', 'btn_details_show': 'Show details', 'btn_details_hide': 'Hide details',
+        'install': 'Also install into the game (UserData\\FigureShop)',
+        'stat_empty': 'Add models to begin.',
+        'stat_ready': '{total} in the queue. Press Start.',
+        'stat_running': 'Converting {name} ({done} of {total} finished)',
+        'stat_finished': 'Finished: {ok} done, {bad} failed. Copy the folders into UserData\\FigureShop and restart the game.',
+        'msg_no_models': 'No supported model was found.\nSupported: {types}',
+        'msg_nothing_waiting': 'Nothing is waiting in the queue.',
+        'msg_select_one': 'Select one waiting model.',
+        'msg_close_running': 'Conversion is still running. Close anyway?',
+        'dlg_models': 'Choose models', 'dlg_folder': 'Choose a folder with models', 'dlg_logo': 'Choose a logo',
+        'form_title': 'Figure settings',
+        'sec_figure': 'Figure', 'f_folder': 'Folder name', 'f_en': 'Name in English', 'f_tr': 'Name in Turkish',
+        'f_pose': 'Pose (animation)', 'f_price': 'Market value (0 = automatic)', 'f_boxed': 'Gift box market value',
+        'f_up': 'Up axis of the model', 'up_auto': 'Automatic',
+        'sec_preview': 'Preview', 'pv_loading': 'Loading preview…',
+        'pv_hint': 'Drag left / right to turn, up / down to tip it over. Drag with the right button to tip it sideways. The side you see faces the customers.',
+        'pv_tip': 'Tip over 90°', 'pv_side': 'Tip sideways 90°', 'pv_turn': 'Turn 180°', 'pv_auto': 'Automatic',
+        'pv_autostate': 'Orientation: automatic', 'pv_manual': 'Orientation: set by hand',
+        'pv_frame': 'Frame {n} / {total} ({sec} s) – the figure is made in this frame', 'pv_frame_rest': 'No animation: rest pose',
+        'sec_licence': 'Licence', 'lic_default': 'Fabi Figures (default)', 'lic_own': 'My own licence',
+        'l_name': 'Licence name in English', 'l_tr': 'Licence name in Turkish', 'l_price': 'Licence price',
+        'l_level': 'Licence level', 'l_logo': 'Licence logo (PNG)', 'btn_browse': 'Browse…',
+        'req_note': 'Needs FigureShop 1.3+ and Fabianens Mod Market 1.4+ in the game. The licence and the figures are sold on the MODS screen.',
+        'btn_create': 'Create', 'btn_save': 'Save', 'btn_cancel': 'Cancel', 'btn_continue': 'Continue',
+        'lic_all_title': 'Licence for all figures', 'btn_licence': 'Licence for all…', 'lic_current': 'Licence: {name}',
+        'lic_all_note': 'Every figure in the queue is sold under this licence. Edit… on a single model changes only that one. Needs FigureShop 1.3+ and Fabianens Mod Market 1.4+ in the game.',
+        'busy_read': 'Reading {name}…', 'busy_convert': 'Converting {name}…', 'busy_note': 'This can take up to a minute for large models.',
+        'done_title': 'Done',
+        'done_text': 'The figure is ready: {folder}\n\nCopy the folder into the game\'s UserData\\FigureShop folder and restart the game.',
+        'err_title': 'Error',
+        'err_read': 'The model cannot be read (broken or unsupported file).',
+        'err_no_mesh': 'The model has no visible mesh (only a skeleton or animation?). Use a model that contains a mesh.',
+        'err_zip': 'The zip file contains no .gltf or .glb model.',
+        'err_blender': 'FBX, OBJ and BLEND files need Blender 4.x. Install Blender or save the model as GLB.',
+        'err_fbx': 'Blender could not convert the model to GLB.',
+        'err_decimate': 'Blender could not reduce the polygons.',
+    },
+    'tr': {
+        '_name': 'Türkçe',
+        'language': 'Dil',
+        'app_sub': '3D modelleri FigureShop figürüne çevirir',
+        'hint': '3D modelleri ya da klasörleri bu pencereye sürükle-bırak veya Dosya ekle\'yi kullan. Başlat\'a basınca sırayla çevrilir.',
+        'drop_here': 'Modelleri buraya bırak\n.glb  .gltf  .zip  .fbx  .obj  .blend',
+        'col_model': 'Model', 'col_folder': 'Çıktı klasörü', 'col_status': 'Durum',
+        'st_wait': 'Bekliyor', 'st_edit': 'Düzenleniyor', 'st_run': 'Çevriliyor…', 'st_done': 'Tamam', 'st_err': 'Hata',
+        'btn_add': 'Dosya ekle…', 'btn_add_folder': 'Klasör ekle…', 'btn_edit': 'Düzenle…', 'btn_remove': 'Çıkar',
+        'btn_retry': 'Tekrar dene', 'btn_clear': 'Bitenleri temizle', 'btn_out': 'Çıktı klasörünü aç', 'btn_start': 'Başlat',
+        'btn_running': 'Çevriliyor…', 'btn_details_show': 'Ayrıntıları göster', 'btn_details_hide': 'Ayrıntıları gizle',
+        'install': 'Oyuna da kur (UserData\\FigureShop)',
+        'stat_empty': 'Başlamak için model ekle.',
+        'stat_ready': 'Kuyrukta {total} model var. Başlat\'a bas.',
+        'stat_running': '{name} çevriliyor ({total} modelden {done} tanesi bitti)',
+        'stat_finished': 'Bitti: {ok} tamam, {bad} hata. Klasörleri UserData\\FigureShop içine kopyala ve oyunu yeniden başlat.',
+        'msg_no_models': 'Desteklenen bir model bulunamadı.\nDesteklenenler: {types}',
+        'msg_nothing_waiting': 'Kuyrukta bekleyen model yok.',
+        'msg_select_one': 'Bekleyen tek bir model seç.',
+        'msg_close_running': 'Çevirme sürüyor. Yine de kapatılsın mı?',
+        'dlg_models': 'Modelleri seç', 'dlg_folder': 'Modellerin olduğu klasörü seç', 'dlg_logo': 'Logo seç',
+        'form_title': 'Figür ayarları',
+        'sec_figure': 'Figür', 'f_folder': 'Klasör adı', 'f_en': 'İngilizce adı', 'f_tr': 'Türkçe adı',
+        'f_pose': 'Poz (animasyon)', 'f_price': 'Piyasa değeri (0 = otomatik)', 'f_boxed': 'Kutulu piyasa değeri',
+        'f_up': 'Modelin yukarı ekseni', 'up_auto': 'Otomatik',
+        'sec_preview': 'Önizleme', 'pv_loading': 'Önizleme hazırlanıyor…',
+        'pv_hint': 'Sola / sağa sürükle: döndür, yukarı / aşağı: öne / arkaya yatır. Sağ tuşla sürükle: yana yatır. Gördüğün yüz müşteriye bakar.',
+        'pv_tip': 'Öne yatır 90°', 'pv_side': 'Yana yatır 90°', 'pv_turn': '180° çevir', 'pv_auto': 'Otomatik',
+        'pv_autostate': 'Yön: otomatik', 'pv_manual': 'Yön: elle ayarlandı',
+        'pv_frame': 'Kare {n} / {total} ({sec} sn) – figür bu karede yapılır', 'pv_frame_rest': 'Animasyon yok: dinlenme pozu',
+        'sec_licence': 'Lisans', 'lic_default': 'Fabi Figures (varsayılan)', 'lic_own': 'Kendi lisansım',
+        'l_name': 'Lisansın İngilizce adı', 'l_tr': 'Lisansın Türkçe adı', 'l_price': 'Lisans fiyatı',
+        'l_level': 'Lisans seviyesi', 'l_logo': 'Lisans logosu (PNG)', 'btn_browse': 'Seç…',
+        'req_note': 'Oyunda FigureShop 1.3+ ve Fabianens Mod Market 1.4+ gerekir. Lisans ve figürler MODLAR ekranında satılır.',
+        'btn_create': 'Oluştur', 'btn_save': 'Kaydet', 'btn_cancel': 'İptal', 'btn_continue': 'Devam',
+        'lic_all_title': 'Bütün figürler için lisans', 'btn_licence': 'Herkes için lisans…', 'lic_current': 'Lisans: {name}',
+        'lic_all_note': 'Kuyruktaki bütün figürler bu lisansla satılır. Tek bir modelde Düzenle… sadece onu değiştirir. Oyunda FigureShop 1.3+ ve Fabianens Mod Market 1.4+ gerekir.',
+        'busy_read': '{name} okunuyor…', 'busy_convert': '{name} çevriliyor…', 'busy_note': 'Büyük modellerde bir dakikayı bulabilir.',
+        'done_title': 'Tamam',
+        'done_text': 'Figür hazır: {folder}\n\nKlasörü oyunun UserData\\FigureShop klasörüne kopyala ve oyunu yeniden başlat.',
+        'err_title': 'Hata',
+        'err_read': 'Model okunamadı (bozuk ya da desteklenmeyen dosya).',
+        'err_no_mesh': 'Modelde görünen bir mesh yok (sadece iskelet ya da animasyon mu?). Mesh içeren bir model kullan.',
+        'err_zip': 'Zip dosyasında .gltf ya da .glb model yok.',
+        'err_blender': 'FBX, OBJ ve BLEND dosyaları için Blender 4.x gerekir. Blender kur ya da modeli GLB olarak kaydet.',
+        'err_fbx': 'Blender modeli GLB\'ye çeviremedi.',
+        'err_decimate': 'Blender poligonları azaltamadı.',
+    },
+}
+
+
+class FMError(RuntimeError):
+    """kullaniciya gosterilen hata: metni dil dosyasindan gelir, teknik ayrinti konsola / ayrintilara"""
+    def __init__(self, key, detail=''):
+        self.key, self.detail = key, str(detail or '')
+        super().__init__(STRINGS['en'].get(key, key) + (f' ({self.detail[:300]})' if self.detail else ''))
+
+
+class I18n:
+    def __init__(self):
+        self.subs = []
+        self.ensure_files()
+        self.scan()
+        code = self.setting('lang') or self.system_lang()
+        self.code = code if code in self.langs else 'en'
+
+    def ensure_files(self):
+        """en.json / tr.json yoksa yaz; varsa elle yapilan ceviriye dokunma, sadece yeni anahtarlari ekle"""
+        try: os.makedirs(LANG_DIR, exist_ok=True)
+        except Exception as e: log('lang klasoru olusturulamadi:', e); return
+        for code, d in STRINGS.items():
+            p = os.path.join(LANG_DIR, code + '.json')
+            try:
+                cur = json.load(open(p, encoding='utf-8-sig')) if os.path.exists(p) else {}
+                miss = {k: v for k, v in d.items() if k not in cur}
+                if miss:
+                    cur.update(miss)
+                    with open(p, 'w', encoding='utf-8') as f: json.dump(cur, f, ensure_ascii=False, indent=2)
+            except Exception as e: log('dil dosyasi yazilamadi:', p, e)
+
+    def scan(self):
+        """lang klasorunu oku; degisen bir sey varsa acik pencereleri yenile"""
+        langs = {c: dict(d) for c, d in STRINGS.items()}
+        for p in sorted(glob.glob(os.path.join(LANG_DIR, '*.json'))):
+            c = os.path.splitext(os.path.basename(p))[0].lower()
+            try: d = json.load(open(p, encoding='utf-8-sig'))
+            except Exception as e: log('dil dosyasi okunamadi:', p, e); continue
+            if isinstance(d, dict): langs[c] = {**langs.get(c, {}), **{k: str(v) for k, v in d.items()}}
+        changed = getattr(self, 'langs', None) not in (None, langs)
+        self.langs = langs
+        if changed: self.notify()
+        return langs
+
+    def names(self):
+        return sorted(((c, d.get('_name') or c) for c, d in self.langs.items()), key=lambda x: x[1].lower())
+
+    def t(self, key, **kw):
+        s = self.langs.get(self.code, {}).get(key) or STRINGS['en'].get(key) or key
+        try: return s.format(**kw) if kw else s
+        except Exception: return s
+
+    def set(self, code):
+        if code == self.code or code not in self.langs: return
+        self.code = code
+        self.save_setting('lang', code)
+        self.notify()
+
+    def notify(self):
+        for f in list(self.subs):
+            try: f()
+            except Exception:        # pencere kapanmis
+                if f in self.subs: self.subs.remove(f)
+
+    def watch(self, f): self.subs.append(f); f(); return f
+    def unwatch(self, f):
+        if f in self.subs: self.subs.remove(f)
+
+    def setting(self, k):
+        try: return json.load(open(SETTINGS, encoding='utf-8')).get(k)
+        except Exception: return None
+
+    def save_setting(self, k, v):
+        try:
+            d = json.load(open(SETTINGS, encoding='utf-8')) if os.path.exists(SETTINGS) else {}
+            d[k] = v
+            with open(SETTINGS, 'w', encoding='utf-8') as f: json.dump(d, f, ensure_ascii=False, indent=2)
+        except Exception as e: log('ayar yazilamadi:', e)
+
+    def system_lang(self):
+        try:
+            import ctypes, locale
+            return (locale.windows_locale.get(ctypes.windll.kernel32.GetUserDefaultUILanguage()) or 'en').split('_')[0].lower()
+        except Exception:
+            return 'en'
+
+
+_I18N = None
+def L():
+    global _I18N
+    if _I18N is None: _I18N = I18n()
+    return _I18N
+def T(key, **kw): return L().t(key, **kw)
+
+
+def err_text(e):
+    """hatanin secili dildeki metni (FMError) ya da ham metni"""
+    if isinstance(e, FMError):
+        return T(e.key) + ('\n\n' + e.detail[:600] if e.detail and e.key in ('err_fbx', 'err_decimate', 'err_read') else '')
+    return str(e)[:1500] or type(e).__name__
+
+
+# ---------------- pencereler / windows ----------------
+_TK = None
+def tkroot():
+    """tek, gizli Tk koku (dosya secimi, form ve mesajlar hep bunu kullanir)"""
+    global _TK
+    if _TK is None:
+        import tkinter as tk
+        from tkinter import ttk, font
+        try:
+            import ctypes; ctypes.windll.shcore.SetProcessDpiAwareness(1)   # keskin yazi
+        except Exception: pass
+        _TK = tk.Tk(); _TK.withdraw()
+        st = ttk.Style(_TK)
+        if 'vista' in st.theme_names(): st.theme_use('vista')
+        for n in ('TkDefaultFont', 'TkTextFont', 'TkMenuFont', 'TkHeadingFont'):
+            try: font.nametofont(n).configure(family='Segoe UI', size=10)
+            except Exception: pass
+        st.configure('Treeview', rowheight=int(26 * ui_scale()))
+        st.configure('Treeview.Heading', font=('Segoe UI Semibold', 10))
+        st.configure('Title.TLabel', font=('Segoe UI Semibold', 15))
+        st.configure('Sub.TLabel', foreground='#5f6368')
+        st.configure('Drop.TLabel', foreground='#8a8f98', background='white', font=('Segoe UI', 12), justify='center')
+        st.configure('Accent.TButton', font=('Segoe UI Semibold', 10), padding=(18, 6))
+        st.configure('Section.TLabelframe.Label', font=('Segoe UI Semibold', 10))
+    return _TK
+
+
+def ui_scale():
+    try: return max(1.0, tkroot().winfo_fpixels('1i') / 96.0)
+    except Exception: return 1.0
+
+
+def hide_console():
+    """exe'ye cift tik / surukle-birak: arkadaki siyah konsolu gizle (komut satirindan calisinca gizleme)"""
+    if os.name != 'nt': return
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        arr = (ctypes.c_uint * 8)()
+        if k.GetConsoleProcessList(arr, 8) <= (2 if FROZEN else 1):
+            h = k.GetConsoleWindow()
+            if h: ctypes.windll.user32.ShowWindow(h, 0)
+    except Exception: pass
+
+
+def message(title, text, error=False):
+    if _TK is None: return
+    from tkinter import messagebox
+    (messagebox.showerror if error else messagebox.showinfo)(title, text, parent=_TK)
+
+
+def bring_front(win):
+    win.lift(); win.attributes('-topmost', True); win.after(300, lambda: win.attributes('-topmost', False)); win.focus_force()
+
+
+def center(win, parent=None):
+    win.update_idletasks()
+    w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+    if parent is not None and parent.winfo_viewable():
+        x = parent.winfo_rootx() + (parent.winfo_width() - w) // 2; y = parent.winfo_rooty() + (parent.winfo_height() - h) // 3
+    else:
+        x = (win.winfo_screenwidth() - w) // 2; y = (win.winfo_screenheight() - h) // 3
+    win.geometry(f'+{max(0, x)}+{max(0, y)}')
+
+
+def lang_picker(parent):
+    """sag ustteki dil secici: secince butun acik pencereler aninda o dile gecer; liste her acilista lang klasorunu yeniden tarar"""
+    from tkinter import ttk
+    i = L()
+    fr = ttk.Frame(parent)
+    lbl = ttk.Label(fr); lbl.pack(side='left', padx=(0, 6))
+    box = ttk.Combobox(fr, state='readonly', width=14); box.pack(side='left')
+    codes = []
+    def fill():
+        names = i.names(); codes[:] = [c for c, _ in names]
+        box['values'] = [n for _, n in names]
+        if i.code in codes: box.current(codes.index(i.code))
+        lbl.config(text=T('language'))
+    box.configure(postcommand=lambda: (i.scan(), fill()))
+    box.bind('<<ComboboxSelected>>', lambda e: i.set(codes[box.current()]))
+    i.watch(fill)
+    return fr
+
+
+def fmt_num(x):
+    try:
+        f = float(x); return str(int(f)) if f == int(f) else str(f)
+    except Exception: return str(x)
+
+
+def form(d, anims, title_name='', save=False, parent=None, licence_only=False, prep=None):
+    """Figur ve lisans bilgileri formu (tkinter). licence_only: toplu cevirmede bir kez sorulan, herkese uygulanan lisans.
+    prep verilirse sagda on izleme: fare ile cevrilen yon res['orient'] (3x3) olarak doner. Iptal -> None"""
+    import tkinter as tk
+    from tkinter import ttk, filedialog
+    i = L(); res = {}
+    master = tkroot()
+    root = tk.Toplevel(parent or master); root.resizable(False, False)
+    if parent is not None: root.transient(parent)
+    root.protocol('WM_DELETE_WINDOW', root.destroy)
+    fr = ttk.Frame(root, padding=(18, 14, 18, 16)); fr.grid(sticky='nsew'); fr.columnconfigure(0, weight=1)
+    texts = []                       # (widget, anahtar) -> dil degisince yenilenir
+
+    head = ttk.Frame(fr); head.grid(row=0, column=0, columnspan=2, sticky='we'); head.columnconfigure(0, weight=1)
+    title = ttk.Label(head, style='Title.TLabel'); title.grid(row=0, column=0, sticky='w')
+    lang_picker(head).grid(row=0, column=1, sticky='ne', padx=(16, 0))
+    if title_name: ttk.Label(head, text=title_name, style='Sub.TLabel').grid(row=1, column=0, columnspan=2, sticky='w')
+
+    v = {k: tk.StringVar(root, value=fmt_num(d.get(k, '')) if k in ('price', 'boxed_price', 'lic_price', 'lic_level') else str(d.get(k, '') or ''))
+         for k in ('folder', 'en', 'tr', 'pose', 'price', 'boxed_price', 'lic_name', 'lic_tr', 'lic_price', 'lic_level', 'lic_logo')}
+    own = tk.BooleanVar(root, value=bool(d.get('lic_name')))
+
+    def row(box, r, key, w):
+        lbl = ttk.Label(box); lbl.grid(row=r, column=0, sticky='w', padx=(0, 14), pady=4); w.grid(row=r, column=1, sticky='we', pady=4)
+        texts.append((lbl, key)); return w
+
+    fig = ttk.LabelFrame(fr, padding=(12, 8), style='Section.TLabelframe'); fig.columnconfigure(1, weight=1)
+    if not licence_only: fig.grid(row=1, column=0, sticky='we', pady=(12, 0))
+    first = row(fig, 0, 'f_folder', ttk.Entry(fig, textvariable=v['folder'], width=44))
+    row(fig, 1, 'f_en', ttk.Entry(fig, textvariable=v['en']))
+    row(fig, 2, 'f_tr', ttk.Entry(fig, textvariable=v['tr']))
+    row(fig, 3, 'f_pose', ttk.Combobox(fig, textvariable=v['pose'], values=(anims or []) + ['-'], state='readonly' if anims else 'disabled'))
+    row(fig, 4, 'f_price', ttk.Entry(fig, textvariable=v['price'], width=12)).grid(sticky='w')
+    row(fig, 5, 'f_boxed', ttk.Entry(fig, textvariable=v['boxed_price'], width=12)).grid(sticky='w')
+    UPS = ['Y', 'Z', '-Z', 'X', '-X', '-Y']        # modelin yukari ekseni; ilk secenek "otomatik"
+    up0 = str(d.get('up') or 'auto').upper().replace('+', '')
+    upv = tk.StringVar(root, value=up0 if up0 in UPS else T('up_auto'))
+    upbox = row(fig, 6, 'f_up', ttk.Combobox(fig, textvariable=upv, state='readonly', width=16)); upbox.grid(sticky='w')
+
+    lic = ttk.LabelFrame(fr, padding=(12, 8), style='Section.TLabelframe'); lic.grid(row=2, column=0, sticky='we', pady=(12, 0)); lic.columnconfigure(1, weight=1)
+    rb1 = ttk.Radiobutton(lic, variable=own, value=False); rb1.grid(row=0, column=0, columnspan=2, sticky='w')
+    rb2 = ttk.Radiobutton(lic, variable=own, value=True); rb2.grid(row=1, column=0, columnspan=2, sticky='w', pady=(2, 4))
+    texts += [(rb1, 'lic_default'), (rb2, 'lic_own')]
+    own_w = [row(lic, 2, 'l_name', ttk.Entry(lic, textvariable=v['lic_name'])),
+             row(lic, 3, 'l_tr', ttk.Entry(lic, textvariable=v['lic_tr'])),
+             row(lic, 4, 'l_price', ttk.Entry(lic, textvariable=v['lic_price'], width=12)),
+             row(lic, 5, 'l_level', ttk.Entry(lic, textvariable=v['lic_level'], width=12))]
+    own_w[2].grid(sticky='w'); own_w[3].grid(sticky='w')
+    lf = ttk.Frame(lic); lf.columnconfigure(0, weight=1)
+    le = ttk.Entry(lf, textvariable=v['lic_logo']); le.grid(row=0, column=0, sticky='we')
+    def browse():
+        p = filedialog.askopenfilename(parent=root, title=T('dlg_logo'), filetypes=[('PNG', '*.png')])
+        if p: v['lic_logo'].set(p)
+    lb = ttk.Button(lf, command=browse); lb.grid(row=0, column=1, padx=(6, 0)); texts.append((lb, 'btn_browse'))
+    row(lic, 6, 'l_logo', lf); own_w += [le, lb]
+    def sync_own(*_):
+        for w in own_w: w.state(['!disabled'] if own.get() else ['disabled'])
+    own.trace_add('write', sync_own); sync_own()
+
+    note = ttk.Label(fr, style='Sub.TLabel', wraplength=int(470 * ui_scale())); note.grid(row=3, column=0, sticky='w', pady=(10, 0))
+    texts.append((note, 'lic_all_note' if licence_only else 'req_note'))
+
+    pv = preview_panel(fr, root, prep, anims, v['pose'], upv, UPS, texts, d.get('pose_frame', 0)) if prep is not None and not licence_only else None
+    if pv: pv['frame'].grid(row=1, column=1, rowspan=3, sticky='n', padx=(16, 0), pady=(12, 0))
+
+    def ok(_e=None):
+        res.update({k: x.get().strip() for k, x in v.items()}); res['own'] = own.get()
+        res['up'] = upv.get() if upv.get() in UPS else 'auto'
+        if pv and pv['state']['manual']: res['orient'] = [float(x) for x in pv['state']['R'].ravel()]
+        if pv: res['pose_frame'] = pv['frame_of'](res['pose'])
+        root.destroy()
+    bf = ttk.Frame(fr); bf.grid(row=4, column=0, columnspan=2, sticky='e', pady=(14, 0))
+    cb = ttk.Button(bf, command=root.destroy); cb.pack(side='right')
+    okb = ttk.Button(bf, command=ok, style='Accent.TButton'); okb.pack(side='right', padx=(0, 8))
+    texts += [(cb, 'btn_cancel'), (okb, 'btn_continue' if licence_only else 'btn_save' if save else 'btn_create')]
+    root.bind('<Return>', ok); root.bind('<Escape>', lambda e: root.destroy())
+
+    def retext():
+        tk_ = 'lic_all_title' if licence_only else 'form_title'
+        root.title('Figure Maker – ' + T(tk_)); title.config(text=T(tk_))
+        fig.config(text=T('sec_figure')); lic.config(text=T('sec_licence'))
+        for w, k in texts: w.config(text=T(k))
+        if upv.get() not in UPS: upv.set(T('up_auto'))
+        upbox['values'] = [T('up_auto')] + UPS
+        if pv: pv['retext']()
+    i.watch(retext)
+    center(root, parent); bring_front(root); (rb1 if licence_only else first).focus_set()
+    if parent is not None: root.grab_set()
+    master.wait_window(root)
+    i.unwatch(retext)
+    return res or None
+
+
+def preview_panel(fr, root, prep, anims, posevar, upv, UPS, texts, frame0=0):
+    """formun sagindaki on izleme: fare ile surukle (sola/saga: dondur, yukari/asagi: one/arkaya yatir, sag tus: yana yatir),
+    birakinca 90 / 5 dereceye oturur. Gorulen yuz oyunda musteriye bakar. state['manual'] -> elle ayarlandi.
+    Altta kare kaydiricisi: secili animasyonun hangi karesinde figur yapilacak (figure.json poseFrame)"""
+    import tkinter as tk, threading
+    from tkinter import ttk
+    from PIL import ImageTk
+    import orient
+    sc = ui_scale(); W, H = int(300 * sc), int(380 * sc)
+    box = ttk.LabelFrame(fr, padding=(10, 8), style='Section.TLabelframe')
+    img = tk.Label(box, background='#eef0f4', cursor='fleur', anchor='center', compound='center')
+    img.pack(); blank = tk.PhotoImage(width=W, height=H); img.config(image=blank)
+    stat = ttk.Label(box, style='Sub.TLabel'); stat.pack(anchor='w', pady=(6, 0))
+    fv = tk.DoubleVar(root, value=0)
+    scale = ttk.Scale(box, from_=0, to=1, orient='horizontal', variable=fv, length=W); scale.pack(fill='x', pady=(6, 0))
+    flab = ttk.Label(box, style='Sub.TLabel'); flab.pack(anchor='w')
+    hint = ttk.Label(box, style='Sub.TLabel', wraplength=W, justify='left'); hint.pack(anchor='w', pady=(2, 6))
+    bts = ttk.Frame(box); bts.pack(fill='x')
+    g = prep['g']
+    st = dict(R=np.eye(3), manual=False, pts=None, drag=None, live=None, photo=None, busy=False, want=None, pending=False,
+              tex={}, timer=None)
+    def cur_up(): return upv.get() if upv.get() in UPS else 'auto'
+
+    def frames_of(k):                                       # model.skin ile ayni kare sayisi (30 fps)
+        return conv.clip_frames(g, g.j['animations'][k])[1] if k is not None else 1
+
+    def frame_of(name):
+        k = next((q for q, a in enumerate(anims or []) if a == name), None)
+        return min(int(round(fv.get())), frames_of(k) - 1) if k is not None else 0
+
+    def frame_text():
+        k = pose_index(); n = frames_of(k); f = min(int(round(fv.get())), n - 1)
+        flab.config(text=T('pv_frame_rest') if k is None else T('pv_frame', n=f + 1, total=n, sec='%.2f' % (f / 30.0)))
+
+    def setup_scale(f=0):
+        """poz degisince kaydiricinin araligi o klibin karelerine gore; tek kareli / animasyonsuz -> kapali"""
+        k = pose_index(); n = frames_of(k)
+        scale.config(to=max(n - 1, 1)); fv.set(min(max(int(f), 0), n - 1))
+        scale.state(['!disabled'] if k is not None and n > 1 else ['disabled'])
+        frame_text()
+
+    def draw():
+        if st['pts'] is None: return
+        R = st['live'] if st['live'] is not None else st['R']
+        st['photo'] = ImageTk.PhotoImage(orient.render(*st['pts'], R, W, H))
+        img.config(image=st['photo'], text='')
+
+    def status():
+        stat.config(text=T('pv_manual' if st['manual'] else 'pv_autostate'))
+
+    def pose_index():
+        n = posevar.get()
+        return next((k for k, a in enumerate(anims or []) if a == n), None)
+
+    def load():
+        """noktalari arka planda hazirla (buyuk dokularda bir iki saniye surer), sonra ciz"""
+        k = pose_index(); f = frame_of(posevar.get()); key = (k, f)
+        if st['busy']: st['want'] = key; return
+        st['busy'] = True; st['want'] = None
+        if st['pts'] is None: img.config(image=blank, text=T('pv_loading'))   # kare degisirken eski resim kalsin
+        out = {}; up = cur_up()                              # tk degiskeni is parcacigindan okunmaz
+        def job():
+            try:
+                out['pts'] = orient.load(g, k, frame=f, cache=st['tex'])
+                out['R'] = orient.initial(g, up)
+            except Exception as e: out['e'] = e; traceback.print_exc()
+        th = threading.Thread(target=job, daemon=True); th.start()
+        def poll():
+            if th.is_alive(): root.after(80, poll); return
+            st['busy'] = False
+            if 'e' in out: img.config(text=str(out['e'])[:200]); return
+            st['pts'] = out['pts']
+            if not st['manual']: st['R'] = out['R']
+            draw(); status()
+            if st['want'] is not None and st['want'] != key: load()
+        root.after(80, poll)
+
+    def set_R(R, manual=True):
+        st['R'] = orient.snap(R); st['manual'] = manual; st['live'] = None; draw(); status()
+
+    def auto():
+        st['manual'] = False
+        if st['pts'] is not None: set_R(orient.initial(g, cur_up()), False)
+        else: status()
+
+    def press(e, btn):
+        if st['pts'] is not None: st['drag'] = (e.x, e.y, btn, st['R'])
+
+    def angles(e):
+        x0, y0, btn, R0 = st['drag']; dx, dy = e.x - x0, e.y - y0
+        if btn == 3: return 0.0, 0.0, dx * 0.6                      # sag tus: yana yatir (kamera ekseni)
+        return dx * 0.6, dy * 0.6, 0.0
+
+    def rot(yaw, tip, roll, R0):
+        return orient.rz(-roll) @ orient.rx(tip) @ orient.ry(yaw) @ R0
+
+    def move(e):
+        if not st['drag'] or st['pts'] is None: return
+        st['live'] = rot(*angles(e), st['drag'][3])
+        if not st['pending']:
+            st['pending'] = True
+            def later(): st['pending'] = False; draw()
+            root.after(16, later)
+
+    def release(e):
+        if not st['drag'] or st['pts'] is None: st['drag'] = None; return
+        yaw, tip, roll = angles(e); R0 = st['drag'][3]; st['drag'] = None
+        if abs(yaw) < 1 and abs(tip) < 1 and abs(roll) < 1: st['live'] = None; draw(); return
+        set_R(rot(round(yaw / 5) * 5, round(tip / 90) * 90, round(roll / 90) * 90, R0))
+
+    for b in (1, 3):
+        img.bind(f'<ButtonPress-{b}>', lambda e, b=b: press(e, b))
+        img.bind(f'<B{b}-Motion>', move)
+        img.bind(f'<ButtonRelease-{b}>', release)
+    def turn(M):
+        if st['pts'] is not None: set_R(M @ st['R'])
+    buttons = [('pv_tip', lambda: turn(orient.rx(90))), ('pv_side', lambda: turn(orient.rz(-90))),
+               ('pv_turn', lambda: turn(orient.ry(180))), ('pv_auto', auto)]
+    for k, (key, cmd) in enumerate(buttons):
+        b = ttk.Button(bts, command=cmd); b.grid(row=k // 2, column=k % 2, sticky='we', padx=(0, 4) if k % 2 == 0 else 0, pady=2)
+        texts.append((b, key))
+    bts.columnconfigure(0, weight=1); bts.columnconfigure(1, weight=1)
+    texts.append((hint, 'pv_hint'))
+    def pose_changed(*_): setup_scale(0); load()
+    posevar.trace_add('write', pose_changed)
+    def frame_moved():                                       # surukerken yazi hemen, resim kisa bir duraklamadan sonra
+        fv.set(round(fv.get())); frame_text()
+        if st['timer']: root.after_cancel(st['timer'])
+        def later(): st['timer'] = None; load()
+        st['timer'] = root.after(120, later)
+    scale.config(command=lambda *_: frame_moved())
+    last = [cur_up()]
+    def up_changed(*_):                                      # eksen secilince elle ayar biter, o eksenden baslar (dil degisimi sayilmaz)
+        if cur_up() != last[0]: last[0] = cur_up(); auto()
+    upv.trace_add('write', up_changed)
+
+    def retext():
+        box.config(text=T('sec_preview')); status(); frame_text()
+        if st['pts'] is None: img.config(text=T('pv_loading'))
+    setup_scale(frame0)
+    root.after(50, load)
+    return dict(frame=box, state=st, retext=retext, frame_of=frame_of)
+
+
+def run_busy(fn, text_key, name, parent=None):
+    """fn'i arka planda calistir, bu sirada 'okunuyor / cevriliyor' penceresi goster; sonucu ya da hatasi dondur"""
+    import tkinter as tk, threading
+    from tkinter import ttk
+    master = tkroot()
+    w = tk.Toplevel(parent or master); w.resizable(False, False); w.protocol('WM_DELETE_WINDOW', lambda: None)
+    f = ttk.Frame(w, padding=22); f.pack(fill='both')
+    lab = ttk.Label(f, font=('Segoe UI Semibold', 11)); lab.pack(anchor='w')
+    pb = ttk.Progressbar(f, mode='indeterminate', length=int(380 * ui_scale())); pb.pack(pady=(12, 6)); pb.start(12)
+    sub = ttk.Label(f, style='Sub.TLabel'); sub.pack(anchor='w')
+    def retext():
+        w.title('Figure Maker'); lab.config(text=T(text_key, name=name)); sub.config(text=T('busy_note'))
+    L().watch(retext)
+    res = {}
+    def job():
+        try: res['v'] = fn()
+        except BaseException as e: res['e'] = e; traceback.print_exc()
+    th = threading.Thread(target=job, daemon=True); th.start()
+    def poll():
+        if th.is_alive(): w.after(120, poll)
+        else: w.destroy()
+    center(w, parent); bring_front(w); w.after(120, poll)   # pencere wait_window'dan once kapanmasin
+    master.wait_window(w)
+    L().unwatch(retext)
+    if 'e' in res: raise res['e']
+    return res.get('v')
+
+
+def num(s, d):
+    try: return float(str(s).replace(',', '.'))
+    except Exception: return d
+
+
+VERSION = '1.3.0'
+MODEL_TYPES = ('.glb', '.gltf', '.fbx', '.obj', '.blend', '.zip')
+
+
+def prepare(model, a, work_key=None):
+    """modeli oku: kaynak, animasyonlar, emegi gecenler ve varsayilan form degerleri"""
+    model = os.path.abspath(model)
+    stem = os.path.splitext(os.path.basename(model))[0]
+    if stem.lower() in ('scene', 'model', 'source'): stem = os.path.basename(os.path.dirname(model)) or stem
+    work = os.path.join(BASE, 'work', work_key or folder_name(stem)); os.makedirs(work, exist_ok=True)
+    log('kaynak:', model)
+
+    src = find_source(model, work)
+    try: g = conv.Src(src)
+    except Exception as e: raise FMError('err_read', e)
+    anims = [an.get('name') or 'Anim%d' % k for k, an in enumerate(g.j.get('animations', []))]
+    info, lic = credits(g, src)
+    if not lic and os.path.exists(os.path.join(work, 'license.txt')): lic = open(os.path.join(work, 'license.txt'), encoding='utf-8', errors='ignore').read()
+
+    base = pretty(info['title']) if info['title'] else pretty(stem)
+    opt = dict(folder=folder_name(a.name or base), en=a.en or base, tr=a.tr or a.en or base, pose=a.pose or (anims[0] if anims else '-'),
+               price=a.price, boxed_price=a.boxed_price, lic_name=a.licence or '', lic_tr=a.licence_tr or '',
+               lic_price=a.licence_price, lic_level=a.licence_level, lic_logo=a.licence_logo or '', up=getattr(a, 'up', None) or 'auto',
+               pose_frame=int(round(max(a.pose_time or 0.0, 0.0) * 30.0)))
+    return dict(model=model, stem=stem, work=work, src=src, g=g, anims=anims, info=info, lic=lic, base=base, opt=opt)
+
+
+def build(p, opt, a, folder=None):
+    """hazirlanan modelden out\\<klasor> paketini uret; klasor adini dondurur"""
+    g, src, anims, info, lic, work = p['g'], p['src'], p['anims'], p['info'], p['lic'], p['work']
+    folder = folder or folder_name(opt['folder'] or p['base'])
+    out = os.path.join(BASE, 'out', folder)
+    shutil.rmtree(out, True); os.makedirs(out)
+
+    clips = []
+    if anims and opt['pose'] != '-':
+        idx = next((k for k, n in enumerate(anims) if n == opt['pose']), next((k for k, n in enumerate(anims) if opt['pose'].lower() in n.lower()), 0))
+        clips = [(idx, anims[idx])]
+    # pozun karesi (on izlemedeki kaydirici / --pose-time); model.skin 30 fps
+    frame = min(max(int(opt.get('pose_frame') or 0), 0), conv.clip_frames(g, g.j['animations'][clips[0][0]])[1] - 1) if clips else 0
+    tris = tri_count(g)
+    if tris == 0: raise FMError('err_no_mesh')
+    log(f'{tris} ucgen, animasyonlar: {anims[:10] or "-"}; poz: {clips[0][1] + f" (kare {frame})" if clips else "dinlenme pozu"}')
+
+    orient_m = np.array(opt['orient'], float).reshape(3, 3) if opt.get('orient') else None   # on izlemede elle cevrildi
+    up = str(opt.get('up') or 'auto').upper().replace('+', '')
+    if orient_m is not None: up, how = 'custom', 'preview'
+    elif up not in conv.UP_ROT: up, how = conv.detect_up(g)
+    else: how = 'manual'
+    log(f'yukari ekseni: {up} ({how})' + ('' if up == 'Y' else ' -> ayaga kaldirildi'))
+
+    r = conv.convert_anim(src, out, clips, up=orient_m if orient_m is not None else up)
+    if r['tris'] > a.budget * 1.1:
+        before, after = standalone.decimate_skin(os.path.join(out, 'model.skin'), a.budget)
+        log(f'poligon azaltildi: {before} -> {after} ucgen'); r['tris'] = after
+    log(f'model.skin: {r["tris"]} ucgen, {r["parts"]} parca, olcu {r["dims"]}')
+    if orient_m is not None: front, how_front = (0.0, 1.0), 'preview'   # on izlemede gorulen yuz musteriye bakar
+    else: front, how_front = standalone.detect_front(out, frame)
+    rot = standalone.rotation_for(front)
+    log(f'figurun yonu: {how_front} -> RotationY {rot:g}')
+
+    if lic: open(os.path.join(out, 'license.txt'), 'w', encoding='utf-8').write(lic.strip() + '\n')
+    else: log('UYARI: lisans bilgisi bulunamadi - paylasmadan once license.txt ekle (modelin dagitim izni olmali)')
+
+    # oyun ici lisans: varsayilan Fabi Figures; formda kendi lisansi girildiyse o (logo pakete kopyalanir)
+    licence = 'Fabi Figures'
+    if opt['lic_name'] and not opt['lic_name'].lower().startswith('fabi figures'):
+        licence = {'name': opt['lic_name'], 'nameTurkish': opt['lic_tr'] or opt['lic_name'],
+                   'price': num(opt['lic_price'], 1000.0), 'level': int(num(opt['lic_level'], 1))}
+        if opt['lic_logo'] and os.path.exists(opt['lic_logo']):
+            Image.open(opt['lic_logo']).convert('RGBA').save(os.path.join(out, 'licence_logo.png')); licence['logo'] = 'licence_logo.png'
+        log('kendi lisansi:', licence)
+
+    fj = {
+        'nameEnglish': opt['en'] + ' Figure',
+        'nameTurkish': opt['tr'] + ' Figürü',
+        'boxedNameEnglish': opt['en'] + ' Gift Box Figure',
+        'boxedNameTurkish': opt['tr'] + ' Kutulu Hediye Figür',
+        'scale': 1, 'rotationY': rot,
+        'pose': clips[0][1] if clips else '-', 'poseTime': round(frame / 30.0, 4), 'poseFrame': frame,
+        'basePrice': num(opt['price'], 0.0), 'boxedBasePrice': num(opt['boxed_price'], 0.0),
+        'licence': licence,
+        'requires': {'FigureShop': '1.3.3' if frame else '1.3.0', 'ModMarket': '1.4.0'},
+        'credits': info,
+        'maker': {'tool': 'Figure Maker ' + VERSION, 'tris': r['tris'], 'parts': r['parts'], 'up': up, 'facing': how_front},
+    }
+    json.dump(fj, open(os.path.join(out, 'figure.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
+
+    if render_icon(out, work, a.yaw, front, frame): log('icon.png hazir')
+    if make_box_icon(out): log('box_icon.png hazir')
+
+    if a.install:
+        if not os.path.exists(os.path.join(GAME, 'Mods', 'FigureShop.dll')): log('UYARI: Mods\\FigureShop.dll yok - paket FigureShop olmadan calismaz')
+        if not os.path.exists(os.path.join(GAME, 'Mods', 'ModMarket.dll')): log('UYARI: Mods\\ModMarket.dll yok - Fabianens Mod Market zorunlu')
+        dst = os.path.join(USERDATA, folder)
+        shutil.rmtree(dst, True); shutil.copytree(out, dst)
+        log('kuruldu:', dst)
+    log('TAMAM:', out)
+    return folder, out
+
+
+def enable_drop(win, callback):
+    """Windows Gezgini'nden pencereye dosya surukle-birak (WM_DROPFILES, ek kutuphane yok)"""
+    if os.name != 'nt': return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u32, sh = ctypes.windll.user32, ctypes.windll.shell32
+        LRESULT = ctypes.c_ssize_t
+        WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+        u32.SetWindowLongPtrW.restype = ctypes.c_void_p
+        u32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+        u32.CallWindowProcW.restype = LRESULT
+        u32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        sh.DragQueryFileW.restype = wintypes.UINT
+        sh.DragQueryFileW.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_wchar_p, wintypes.UINT]
+        sh.DragFinish.argtypes = [ctypes.c_void_p]
+        sh.DragAcceptFiles.argtypes = [wintypes.HWND, wintypes.BOOL]
+        win.update_idletasks()
+        hwnd = int(win.wm_frame(), 16)
+        # yonetici olarak calisirsa Gezgin'in birakmasina izin ver
+        try:
+            for m in (0x0233, 0x004A, 0x0049): u32.ChangeWindowMessageFilterEx(hwnd, m, 1, None)
+        except Exception: pass
+        state = {}
+        def proc(h, msg, wp, lp):
+            if msg == 0x0233:   # WM_DROPFILES
+                files = []
+                for k in range(sh.DragQueryFileW(wp, 0xFFFFFFFF, None, 0)):
+                    n = sh.DragQueryFileW(wp, k, None, 0)
+                    buf = ctypes.create_unicode_buffer(n + 1); sh.DragQueryFileW(wp, k, buf, n + 1); files.append(buf.value)
+                sh.DragFinish(wp)
+                win.after(0, callback, files)
+                return 0
+            return u32.CallWindowProcW(state['old'], h, msg, wp, lp)
+        state['proc'] = WNDPROC(proc)
+        state['old'] = u32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(state['proc'], ctypes.c_void_p))   # GWLP_WNDPROC
+        sh.DragAcceptFiles(hwnd, True)
+        win._fm_drop = state    # geri cagirma silinmesin
+        return True
+    except Exception as e:
+        log('surukle-birak acilamadi:', e)
+        return False
+
+
+def expand_models(paths):
+    """birakilan / secilen yollar: klasorse icindeki modeller, degilse desteklenen uzantilar"""
+    res = []
+    for p in paths:
+        p = os.path.abspath(p.strip('"'))
+        if os.path.isdir(p):
+            for f in sorted(glob.glob(os.path.join(p, '**', '*'), recursive=True)):
+                if os.path.splitext(f)[1].lower() in MODEL_TYPES and os.path.isfile(f): res.append(f)
+        elif os.path.splitext(p)[1].lower() in MODEL_TYPES and os.path.isfile(p):
+            res.append(p)
+    return res
+
+
+ST_ICON = {'wait': '•', 'edit': '✎', 'run': '⟳', 'done': '✓', 'err': '✗'}
+
+
+def queue_window(a, files):
+    """Toplu cevirme: modelleri listeye at (surukle-birak ya da coklu secim), Baslat'a bas, sirayla cevrilsin"""
+    import tkinter as tk, threading, queue as qmod
+    from tkinter import ttk, filedialog, messagebox
+    global LOG_SINK
+    i = L()
+    master = tkroot(); sc = ui_scale()
+    win = tk.Toplevel(master); win.geometry(f'{int(900 * sc)}x{int(600 * sc)}'); win.minsize(int(700 * sc), int(440 * sc))
+    events = qmod.Queue()
+    lock = threading.Lock()
+    items = []          # dict(id, path, status, opt, prep, folder, out, err, err_key)
+    st = dict(running=False, next_id=1, install=bool(a.install), current='', finished=None, lic=None)
+    LIC = ('lic_name', 'lic_tr', 'lic_price', 'lic_level', 'lic_logo')
+    if a.licence:   # komut satirinda verildiyse sorma
+        st['lic'] = dict(own=True, lic_name=a.licence, lic_tr=a.licence_tr or '', lic_price=a.licence_price, lic_level=a.licence_level, lic_logo=a.licence_logo or '')
+    used_work, used_folder = {}, {}   # bu oturumda verilen work / out klasorleri -> oge id (ayni adli iki model birbirini ezmesin)
+    ba = argparse.Namespace(**vars(a)); ba.name = ba.en = ba.tr = None   # ad her modelin kendisinden
+    LOG_SINK = lambda line: events.put(('log', line))
+    texts = []          # (widget, anahtar)
+
+    fr = ttk.Frame(win, padding=(16, 12, 16, 12)); fr.pack(fill='both', expand=True)
+    fr.columnconfigure(0, weight=1); fr.rowconfigure(3, weight=1)
+
+    # baslik + sag ustte dil secici
+    head = ttk.Frame(fr); head.grid(row=0, column=0, sticky='we'); head.columnconfigure(0, weight=1)
+    ttk.Label(head, text='Figure Maker', style='Title.TLabel').grid(row=0, column=0, sticky='w')
+    lang_picker(head).grid(row=0, column=1, sticky='ne')
+    sub = ttk.Label(head, style='Sub.TLabel'); sub.grid(row=1, column=0, columnspan=2, sticky='w'); texts.append((sub, 'app_sub'))
+    hint = ttk.Label(fr, wraplength=int(860 * sc)); hint.grid(row=1, column=0, sticky='we', pady=(10, 6)); texts.append((hint, 'hint'))
+
+    # arac cubugu
+    tb = ttk.Frame(fr); tb.grid(row=2, column=0, sticky='we', pady=(0, 6))
+    def tbtn(key, cmd, side='left', **kw):
+        b = ttk.Button(tb, command=cmd, **kw); b.pack(side=side, padx=(0, 6)); texts.append((b, key)); return b
+
+    # liste
+    tf = ttk.Frame(fr); tf.grid(row=3, column=0, sticky='nsew')
+    tree = ttk.Treeview(tf, columns=('file', 'folder', 'status'), show='headings', selectmode='extended')
+    for c, w in (('file', 280), ('folder', 240), ('status', 330)): tree.column(c, width=int(w * sc), anchor='w')
+    ysb = ttk.Scrollbar(tf, orient='vertical', command=tree.yview); tree.configure(yscrollcommand=ysb.set)
+    tree.pack(side='left', fill='both', expand=True); ysb.pack(side='right', fill='y')
+    tree.tag_configure('done', foreground='#1a7f37'); tree.tag_configure('err', foreground='#c62828'); tree.tag_configure('run', foreground='#1565c0')
+    drop = ttk.Label(tf, style='Drop.TLabel'); texts.append((drop, 'drop_here'))
+
+    # alt: ilerleme, kur secenegi, Baslat
+    bot = ttk.Frame(fr); bot.grid(row=4, column=0, sticky='we', pady=(10, 0)); bot.columnconfigure(0, weight=1)
+    pbar = ttk.Progressbar(bot, mode='determinate'); pbar.grid(row=0, column=0, columnspan=4, sticky='we')
+    status = ttk.Label(bot); status.grid(row=1, column=0, columnspan=4, sticky='w', pady=(6, 0))
+    install = tk.BooleanVar(win, value=st['install'])
+    install.trace_add('write', lambda *_: st.__setitem__('install', install.get()))
+    opts = ttk.Frame(bot); opts.grid(row=2, column=0, sticky='w', pady=(6, 0))
+    inst = ttk.Checkbutton(opts, variable=install); inst.pack(side='left'); texts.append((inst, 'install'))
+    lic_lbl = ttk.Label(opts, style='Sub.TLabel'); lic_lbl.pack(side='left', padx=(16, 0))
+    out_btn = ttk.Button(bot); out_btn.grid(row=2, column=1, sticky='e', padx=(0, 6), pady=(6, 0))
+    det_btn = ttk.Button(bot); det_btn.grid(row=2, column=2, sticky='e', padx=(0, 6), pady=(6, 0))
+    start_btn = ttk.Button(bot, style='Accent.TButton'); start_btn.grid(row=2, column=3, sticky='e', pady=(6, 0))
+    logf = ttk.Frame(fr)
+    logbox = tk.Text(logf, height=8, wrap='none', state='disabled', font=('Consolas', 9), relief='flat', background='#f6f8fa')
+    lsb = ttk.Scrollbar(logf, orient='vertical', command=logbox.yview); logbox.configure(yscrollcommand=lsb.set)
+    logbox.pack(side='left', fill='both', expand=True); lsb.pack(side='right', fill='y')
+    show_log = tk.BooleanVar(win, value=False)
+
+    def find(iid): return next((x for x in items if x['id'] == iid), None)
+
+    def shown(path):
+        b = os.path.basename(path)
+        if os.path.splitext(b)[0].lower() in ('scene', 'model', 'source'): b = os.path.join(os.path.basename(os.path.dirname(path)), b)
+        return b
+
+    def status_text(x):
+        s = f"{ST_ICON[x['status']]}  {T('st_' + x['status'])}"
+        if x['status'] == 'err': s += ': ' + (T(x['err_key']) if x.get('err_key') else x.get('err') or '')
+        return s
+
+    def refresh(x):
+        folder = x.get('folder') or (x['opt'] or {}).get('folder') or ''
+        vals = (shown(x['path']), folder, status_text(x))
+        if tree.exists(str(x['id'])): tree.item(str(x['id']), values=vals, tags=(x['status'],))
+        else: tree.insert('', 'end', iid=str(x['id']), values=vals, tags=(x['status'],))
+        overall()
+
+    def overall():
+        """ilerleme cubugu, durum satiri, bos liste yazisi ve dugmeler"""
+        total = len(items); done = sum(1 for y in items if y['status'] in ('done', 'err'))
+        pbar.configure(maximum=max(1, total), value=done)
+        if st['running']: txt = T('stat_running', name=st['current'] or '…', done=done, total=total)
+        elif st['finished'] and total: txt = T('stat_finished', ok=st['finished'][0], bad=st['finished'][1])
+        elif total: txt = T('stat_ready', total=total)
+        else: txt = T('stat_empty')
+        status.config(text=txt)
+        l = st['lic']; lic_lbl.config(text=T('lic_current', name=(l['lic_name'] if l and l.get('own') and l.get('lic_name') else 'Fabi Figures')))
+        if total: drop.place_forget()
+        else: drop.place(relx=0.5, rely=0.5, anchor='center')
+        start_btn.config(text=T('btn_running') if st['running'] else T('btn_start'))
+        start_btn.state(['disabled'] if st['running'] or not any(y['status'] == 'wait' for y in items) else ['!disabled'])
+        sel = selected()
+        edit_b.state(['!disabled'] if len(sel) == 1 and sel[0]['status'] == 'wait' else ['disabled'])
+        rem_b.state(['!disabled'] if any(x['status'] not in ('run', 'edit') for x in sel) else ['disabled'])
+        retry_b.state(['!disabled'] if any(x['status'] == 'err' for x in sel) else ['disabled'])
+        clear_b.state(['!disabled'] if done else ['disabled'])
+
+    def add(paths):
+        models = expand_models(paths)
+        if paths and not models:
+            messagebox.showwarning('Figure Maker', T('msg_no_models', types=', '.join(MODEL_TYPES)), parent=win)
+        with lock:
+            have = {x['path'].lower() for x in items if x['status'] in ('wait', 'edit', 'run')}
+            new = []
+            for m in models:
+                if m.lower() in have: continue
+                have.add(m.lower())
+                x = dict(id=st['next_id'], path=m, status='wait', opt=None, prep=None, folder='', out='', err='', err_key='')
+                st['next_id'] += 1; items.append(x); new.append(x)
+            if new and not st['running']: st['finished'] = None
+        for x in new: refresh(x)
+        if new and st['running']: log(f'{len(new)} model kuyruga eklendi')
+
+    def pick():
+        fs = filedialog.askopenfilenames(parent=win, title=T('dlg_models'),
+                                         filetypes=[('3D model', ' '.join('*' + e for e in MODEL_TYPES)), ('*.*', '*.*')])
+        if fs: add(list(fs))
+
+    def pick_folder():
+        d = filedialog.askdirectory(parent=win, title=T('dlg_folder'))
+        if d: add([d])
+
+    def unique(table, key, iid):
+        """ayni ad bu oturumda baska bir ogeye verildiyse _2, _3 ... ekle"""
+        k, n = key, 2
+        while table.get(k.lower(), iid) != iid: k = f'{key}_{n}'; n += 1
+        table[k.lower()] = iid
+        return k
+
+    def work_key(x):
+        stem = os.path.splitext(os.path.basename(x['path']))[0]
+        if stem.lower() in ('scene', 'model', 'source'): stem = os.path.basename(os.path.dirname(x['path'])) or stem
+        with lock: return unique(used_work, folder_name(stem), x['id'])
+
+    def worker():
+        ok = bad = 0
+        while True:
+            with lock:
+                x = next((y for y in items if y['status'] == 'wait'), None)
+                if x is None:
+                    st['running'] = False; st['finished'] = (ok, bad); events.put(('idle', None)); return
+                x['status'] = 'run'; st['current'] = shown(x['path'])
+            events.put(('item', x))
+            try:
+                log(f'===== {os.path.basename(x["path"])} =====')
+                p = x['prep'] or prepare(x['path'], ba, work_key(x))
+                opt = dict(p['opt'])
+                lic = x['opt'] if x['opt'] and x.get('lic_custom') else st['lic']   # tek modelde degistirilmediyse herkes icin lisans
+                if x['opt']: opt.update({k: v for k, v in x['opt'].items() if k != 'own' and k not in LIC})
+                if lic:
+                    opt.update({k: lic[k] for k in LIC if k in lic})
+                    if not lic.get('own'): opt['lic_name'] = ''
+                with lock: folder = unique(used_folder, folder_name(opt['folder'] or p['base']), x['id'])
+                aa = argparse.Namespace(**vars(ba)); aa.install = st['install']   # tk degiskeni is parcacigindan okunmaz
+                x['folder'], x['out'] = build(p, opt, aa, folder)
+                x['status'] = 'done'; ok += 1
+            except Exception as e:
+                log('HATA:', e); log(traceback.format_exc().strip().splitlines()[-1])
+                x['status'] = 'err'; bad += 1
+                x['err_key'] = e.key if isinstance(e, FMError) else ''
+                x['err'] = (str(e).splitlines() or [type(e).__name__])[0][:200]
+            x['prep'] = None   # bellegi birak
+            events.put(('item', x))
+
+    def lic_defaults():
+        d = dict(lic_name='', lic_tr='', lic_price=ba.licence_price, lic_level=ba.licence_level, lic_logo='', own=False)
+        d.update(st['lic'] or {})
+        if not d.get('own'): d['lic_name'] = ''
+        return d
+
+    def ask_licence():
+        """lisansi bir kez sor, kuyruktaki herkese uygula"""
+        r = form(lic_defaults(), [], parent=win, licence_only=True)
+        if r is None: return False
+        st['lic'] = {k: r[k] for k in LIC}; st['lic']['own'] = r['own']
+        overall(); return True
+
+    def start():
+        with lock:
+            if st['running']: return
+            if not any(x['status'] == 'wait' for x in items):
+                messagebox.showinfo('Figure Maker', T('msg_nothing_waiting'), parent=win); return
+        if st['lic'] is None and not ask_licence(): return
+        with lock:
+            if st['running']: return
+            st['running'] = True; st['finished'] = None
+        threading.Thread(target=worker, daemon=True).start()
+        overall()
+
+    def selected(): return [x for x in (find(int(i)) for i in tree.selection()) if x]
+
+    def drop_item(x):
+        items.remove(x); tree.delete(str(x['id']))
+        for t in (used_work, used_folder):
+            for k in [k for k, v in t.items() if v == x['id']]: del t[k]
+
+    def remove():
+        with lock:
+            for x in selected():
+                if x['status'] not in ('run', 'edit'): drop_item(x)
+        overall()
+
+    def clear_done():
+        with lock:
+            for x in [y for y in items if y['status'] in ('done', 'err')]: drop_item(x)
+            st['finished'] = None
+        overall()
+
+    def retry():
+        for x in selected():
+            if x['status'] == 'err': x['status'] = 'wait'; x['err'] = x['err_key'] = ''; refresh(x)
+
+    def edit():
+        sel = selected()
+        if len(sel) != 1 or sel[0]['status'] != 'wait':
+            messagebox.showinfo('Figure Maker', T('msg_select_one'), parent=win); return
+        x = sel[0]
+        with lock:
+            if x['status'] != 'wait': return
+            x['status'] = 'edit'
+        refresh(x)
+        try:
+            if not x['prep']: x['prep'] = run_busy(lambda: prepare(x['path'], ba, work_key(x)), 'busy_read', shown(x['path']), win)
+            d = dict(x['prep']['opt']); d.update({k: v for k, v in (x['opt'] or {}).items() if k not in LIC and k != 'own'})
+            src = x['opt'] if x['opt'] and x.get('lic_custom') else lic_defaults()
+            d.update({k: src.get(k, '') for k in LIC}); d['own'] = src.get('own', False)
+            if not d['own']: d['lic_name'] = ''
+            r = form(d, x['prep']['anims'], shown(x['path']), save=True, parent=win, prep=x['prep'])
+            if r is not None:
+                base = lic_defaults()
+                x['lic_custom'] = bool(r['own']) != bool(base['own']) or (r['own'] and any(str(r[k]) != str(base.get(k, '')) for k in LIC))
+                x['opt'] = r
+        except Exception as e:
+            log('HATA:', e); messagebox.showerror(T('err_title'), err_text(e), parent=win)
+            x['prep'] = None
+        finally:
+            x['status'] = 'wait'; refresh(x)
+
+    def open_item(_e=None):
+        sel = selected()
+        if not sel: return
+        x = sel[0]
+        if x['status'] == 'done' and x['out']:
+            try: os.startfile(x['out'])
+            except Exception: pass
+        elif x['status'] == 'err':
+            messagebox.showerror(T('err_title'), (T(x['err_key']) + '\n\n' if x['err_key'] else '') + (x['err'] or ''), parent=win)
+        elif x['status'] == 'wait': edit()
+
+    def open_out():
+        d = os.path.join(BASE, 'out'); os.makedirs(d, exist_ok=True)
+        try: os.startfile(d)
+        except Exception: pass
+
+    def toggle_log():
+        show_log.set(not show_log.get())
+        if show_log.get(): logf.grid(row=5, column=0, sticky='we', pady=(8, 0))
+        else: logf.grid_forget()
+        det_btn.config(text=T('btn_details_hide' if show_log.get() else 'btn_details_show'))
+
+    tbtn('btn_add', pick); tbtn('btn_add_folder', pick_folder)
+    ttk.Separator(tb, orient='vertical').pack(side='left', fill='y', padx=(4, 10), pady=2)
+    tbtn('btn_licence', ask_licence)
+    ttk.Separator(tb, orient='vertical').pack(side='left', fill='y', padx=(4, 10), pady=2)
+    edit_b = tbtn('btn_edit', edit); rem_b = tbtn('btn_remove', remove); retry_b = tbtn('btn_retry', retry); clear_b = tbtn('btn_clear', clear_done)
+    out_btn.config(command=open_out); texts.append((out_btn, 'btn_out'))
+    start_btn.config(command=start); det_btn.config(command=toggle_log)
+    tree.bind('<Double-1>', open_item); tree.bind('<Delete>', lambda e: remove())
+    tree.bind('<<TreeviewSelect>>', lambda e: overall())
+
+    def retext():
+        win.title(f'Figure Maker {VERSION}')
+        for w, k in texts: w.config(text=T(k))
+        for c in ('file', 'folder', 'status'): tree.heading(c, text=T({'file': 'col_model', 'folder': 'col_folder', 'status': 'col_status'}[c]))
+        det_btn.config(text=T('btn_details_hide' if show_log.get() else 'btn_details_show'))
+        for x in items: refresh(x)
+        overall()
+    i.watch(retext)
+
+    def pump():
+        try:
+            while True:
+                k, v = events.get_nowait()
+                if k == 'log':
+                    logbox.config(state='normal'); logbox.insert('end', v + '\n')
+                    if int(logbox.index('end-1c').split('.')[0]) > 2000: logbox.delete('1.0', '500.0')
+                    logbox.see('end'); logbox.config(state='disabled')
+                elif k == 'item': refresh(v)
+                elif k == 'idle':
+                    overall()
+                    log(f'Kuyruk bitti: {st["finished"][0]} tamam, {st["finished"][1]} hata.')
+        except qmod.Empty: pass
+        if win.winfo_exists(): win.after(150, pump)
+
+    def close():
+        if st['running'] and not messagebox.askyesno('Figure Maker', T('msg_close_running'), parent=win):
+            return
+        win.destroy()
+    win.protocol('WM_DELETE_WINDOW', close)
+
+    win._fm_add = add   # disaridan (test) ekleme
+    if not enable_drop(win, add): log('Not: surukle-birak calismiyor, "Dosya ekle" kullan')
+    add(files)
+    pump()
+    center(win); bring_front(win)
+    master.wait_window(win)
+    i.unwatch(retext)
+    LOG_SINK = None
+
+
+def main():
+    ap = argparse.ArgumentParser(description='FigureShop figur paketi uretici')
+    ap.add_argument('model', nargs='*'); ap.add_argument('--name'); ap.add_argument('--en'); ap.add_argument('--tr')
+    ap.add_argument('--pose'); ap.add_argument('--pose-time', type=float, default=0.0)
+    ap.add_argument('--budget', type=int, default=60000); ap.add_argument('--yaw', type=float, default=25.0)
+    ap.add_argument('--up', default='auto', help='modelin yukari ekseni: auto (bul), Y (oldugu gibi), Z, -Z, X, -X, -Y')
+    ap.add_argument('--price', type=float, default=0.0); ap.add_argument('--boxed-price', type=float, default=0.0)
+    ap.add_argument('--install', action='store_true', help='UserData/FigureShop icine de kopyala')
+    ap.add_argument('--form', action='store_true', help='figur / lisans formunu ac')
+    ap.add_argument('--no-form', action='store_true', help='formu acma (komut satiri)')
+    ap.add_argument('--batch', action='store_true', help='toplu cevirme penceresini ac')
+    ap.add_argument('--licence', help='kendi lisans adi (bos = Fabi Figures)'); ap.add_argument('--licence-tr')
+    ap.add_argument('--licence-price', type=float, default=1000.0); ap.add_argument('--licence-level', type=int, default=1)
+    ap.add_argument('--licence-logo')
+    a = ap.parse_args()
+    models = a.model
+
+    # cift tik (model yok) ya da birden cok model / klasor surukle-birak: toplu pencere
+    if not a.no_form and (a.batch or not models or len(models) > 1 or any(os.path.isdir(m) for m in models)):
+        hide_console()
+        queue_window(a, models)
+        return
+    if a.no_form and (len(models) > 1 or any(os.path.isdir(m) for m in models)):
+        ok = bad = 0
+        for m in expand_models(models):
+            try:
+                b = argparse.Namespace(**vars(a)); b.name = b.en = b.tr = None
+                p = prepare(m, b); build(p, p['opt'], b); ok += 1
+            except Exception as e:
+                traceback.print_exc(); log('HATA:', m, e); bad += 1
+        log(f'Toplu: {ok} tamam, {bad} hata')
+        if bad: sys.exit(1)
+        return
+    if not models: ap.error('model gerekli')
+
+    a.model = models[0]
+    if len(sys.argv) <= 2 and not a.no_form: a.form = True   # surukle-birak / cift tik: form
+    if not a.form:
+        p = prepare(a.model, a); build(p, p['opt'], a)
+        log('Gerekli: FigureShop 1.3+ ve Fabianens Mod Market 1.4+. Klasoru UserData\\FigureShop\\ icine kopyala, oyunu yeniden baslat.')
+        return
+    hide_console()
+    name = os.path.basename(a.model)
+    p = run_busy(lambda: prepare(a.model, a), 'busy_read', name)
+    opt = p['opt']
+    r = form(opt, p['anims'], name, prep=p)
+    if r is None: log('iptal edildi'); return
+    opt.update(r)
+    if not r.get('own'): opt['lic_name'] = ''
+    folder, out = run_busy(lambda: build(p, opt, a), 'busy_convert', name)
+    message('Figure Maker – ' + T('done_title'), T('done_text', folder=folder))
+    try: os.startfile(out)
+    except Exception: pass
+
+if __name__ == '__main__':
+    try: main()
+    except Exception as e:
+        traceback.print_exc()
+        if _TK is not None: message('Figure Maker – ' + T('err_title'), err_text(e), True)
+        sys.exit(1)
