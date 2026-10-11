@@ -1,5 +1,72 @@
-# Figure Maker - make your own FigureShop figures
-Anime Shop Simulator - tool for FigureShop (by Fabianens)
+# Figure Maker for Anime Shop Simulator
+
+Turn any 3D model (GLB, GLTF, Sketchfab zip, FBX, OBJ, BLEND) into a figure pack for the **FigureShop** mod of
+Anime Shop Simulator. The figure is sold in your shop as a loose
+figure and as a gift box figure. Windows only. Made by **Fabianens**.
+
+- [Install the ready exe](#install-the-ready-exe)
+- [Run from source](#run-from-source)
+- [Build the exe yourself](#build-the-exe-yourself)
+- [How to use (full guide, English + Türkçe)](#english)
+
+## Install the ready exe
+
+1. Download **FigureMaker.exe** from the [Releases](../../releases) page (or from Nexus Mods).
+2. Put it in a folder you can write to, e.g. `Desktop\FigureMaker` (results are written next to the exe; Program Files does not work).
+3. Drag a model onto `FigureMaker.exe`, or double-click it for the batch window.
+4. Copy the folder from `out\<name>` into the game's `UserData\FigureShop` folder and restart the game.
+
+In the game you need MelonLoader 0.7.x, **FigureShop 1.3.0+** and **Fabianens Mod Market 1.4.0+**.
+FBX / OBJ / BLEND input also needs [Blender 4.x](https://www.blender.org/download/) installed (GLB, GLTF and zip need nothing).
+If Windows SmartScreen warns, click *More info > Run anyway* (the exe is not signed).
+
+## Run from source
+
+Needs **Python 3.10 or newer (64-bit)** on Windows.
+
+```bat
+git clone https://github.com/universesofcyberpunk/anime-shop-simulator-figure-maker.git
+cd anime-shop-simulator-figure-maker
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+
+python figuremaker.py                          :: batch window (drag and drop, many models)
+python figuremaker.py model.glb                :: one model, opens the form with the 3D preview
+python figuremaker.py model.glb --no-form --install   :: no window, copies straight into UserData\FigureShop
+```
+
+`FigureMaker.bat model.glb` does the same as the second line (drag a model onto the .bat).
+When run from source the tool finds the game in the usual Steam folder; `--install` copies the result there.
+
+## Build the exe yourself
+
+```bat
+.venv\Scripts\activate
+pip install pyinstaller
+pyinstaller --noconfirm FigureMaker.spec
+```
+
+The single-file exe is written to `dist\FigureMaker.exe`. Use a clean venv (only `requirements.txt` + PyInstaller)
+so the exe stays small. `tools\` is bundled inside the exe; `lang\`, `out\`, `work\` and `settings.json` are created
+next to the exe on first use and are not part of the repository.
+
+## Repository layout
+
+| Path | What it is |
+|---|---|
+| `figuremaker.py` | the app: batch window, form with 3D preview, conversion, icons, language files |
+| `tools/conv.py` | glTF reader and converter to the game format (`model.skin`, textures) |
+| `tools/standalone.py` | built-in icon renderer, facing detection, polygon reduction (no Blender needed) |
+| `tools/orient.py` | point-cloud preview used by the form |
+| `tools/fbx2glb.py` | runs inside Blender to turn FBX / OBJ / BLEND into GLB |
+| `tools/gl.py`, `tools/rd.py` | glTF math helpers, `model.skin` reader |
+| `FigureMaker.spec` | PyInstaller recipe for the exe |
+
+Only share figure packs of models whose licence allows it; the tool copies the model's credits into `license.txt`.
+Code licence: MIT (see `LICENSE`).
+
+---
 
 *Türkçe açıklama aşağıda.*
 
@@ -204,25 +271,3 @@ FigureMaker.exe klasor_ya_da_model1 model2 ... --no-form --install
 - 1.2.0 - düzeltme: yukarı ekseni Z olan modeller (Blender / 3ds Max / ZBrush OBJ ve bazı Sketchfab modelleri) yüzüstü yatarak, yere bakarak çıkıyordu; yukarı ekseni artık kendiliğinden bulunuyor (iskelet ya da şekil ve kaide) ve formdan (Modelin yukarı ekseni) ya da --up ile elle seçilebiliyor. Formda yeni önizleme: figürü müşterinin göreceği gibi gör, oluşturmadan önce fareyle (ya da 90° düğmeleriyle) döndür veya yatır. Düzeltme: iskeletsiz figürler sırtı dönük çıkıyordu (elle rotationY 180 gerekiyordu); artık müşteriye bakıyorlar. figure.json "maker" altında bulunan yukarı eksenini ve yönü yazar.
 - 1.1.0 - toplu pencere: birden çok modeli (ya da klasörü) bırak veya seç, her biri durumu görünerek sırayla çevrilir; lisans bütün kuyruk için bir kez sorulur. Exe'nin üzerine tek dosya sürüklenirse yine tek form açılır. Yenilenmiş, tek dilde yazan pencereler ve dil seçici (English / Türkçe, lang klasörüyle başka diller). Model okunurken ve çevrilirken ilerleme penceresi; arkadaki siyah konsol penceresi gizlenir. Düzeltme: büyük modellerden yapılan figürlerde çıkan beyaz / koyu lekeler, çatlaklar ve yanlış doku parçaları giderildi (poligon azaltma doku dikişlerini ve gövde parçalarını karıştırıyordu); rengi parlama (emissive) dokusunda olan modeller artık simsiyah çıkmıyor. 1.0 ile yapılan figürleri yeniden üret.
 - 1.0.0 - ilk sürüm.
-
----
-
-## Building from source
-
-Figure Maker is a single Python script (`figuremaker.py`) plus helpers in `tools/`. It needs Python 3.10+ on Windows.
-
-```
-pip install -r requirements.txt
-python figuremaker.py                 # batch window
-python figuremaker.py model.glb       # one model, form
-python figuremaker.py model.glb --no-form --install
-```
-
-Standalone exe (what the release ships):
-
-```
-pip install pyinstaller
-pyinstaller --noconfirm FigureMaker.spec
-```
-
-FBX / OBJ / BLEND input needs Blender 4.x installed (`tools/fbx2glb.py` runs inside Blender). The output format (`model.skin`, `figure.json`) is read by the FigureShop mod for Anime Shop Simulator.
