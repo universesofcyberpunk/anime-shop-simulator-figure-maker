@@ -20,7 +20,7 @@ mod that loads the packs in the game (`FigureShop/`, C#).
 3. Drag a model onto `FigureMaker.exe`, or double-click it for the batch window.
 4. Copy the folder from `out\<name>` into the game's `UserData\FigureShop` folder and restart the game.
 
-In the game you need MelonLoader 0.7.x, **FigureShop 1.3.0+** and **Fabianens Mod Market 1.4.0+**.
+In the game you need MelonLoader 0.7.x, **FigureShop 1.3.0+** and **[Fabianens Mod Market](https://github.com/universesofcyberpunk/anime-shop-simulator-mod-market) 1.4.0+**.
 FBX / OBJ / BLEND input also needs [Blender 4.x](https://www.blender.org/download/) installed (GLB, GLTF and zip need nothing).
 If Windows SmartScreen warns, click *More info > Run anyway* (the exe is not signed).
 
@@ -59,7 +59,7 @@ next to the exe on first use and are not part of the repository.
 
 `FigureShop/` is the in-game half: a MelonLoader 0.7.x mod (net6.0, IL2CPP) that reads every pack folder in
 `UserData\FigureShop`, registers each figure as a loose and a boxed product with its own licence on the
-**Fabianens Mod Market** MODS screen, and builds the 3D model from `model.skin` at the pose frame in `figure.json`.
+**[Fabianens Mod Market](https://github.com/universesofcyberpunk/anime-shop-simulator-mod-market)** MODS screen, and builds the 3D model from `model.skin` at the pose frame in `figure.json`.
 Players normally get the ready `FigureShop.dll` from Nexus Mods; build it yourself like this:
 
 1. Install the [.NET 6 SDK or newer](https://dotnet.microsoft.com/download) and run the game once with MelonLoader 0.7.x
@@ -118,7 +118,7 @@ Code licence (Figure Maker and FigureShop): MIT, see `LICENSE`. If you reuse the
 
 - MelonLoader 0.7.x
 - **FigureShop 1.3.0** or newer
-- **Fabianens Mod Market 1.4.0** or newer (the licence and figures are sold on the MODS screen)
+- **[Fabianens Mod Market](https://github.com/universesofcyberpunk/anime-shop-simulator-mod-market) 1.4.0** or newer (the licence and figures are sold on the MODS screen)
 
 ### How to use
 
@@ -219,7 +219,7 @@ FigureMaker.exe folder_or_model1 model2 ... --no-form --install
 
 - MelonLoader 0.7.x
 - **FigureShop 1.3.0** veya üstü
-- **Fabianens Mod Market 1.4.0** veya üstü (lisans ve figürler MODLAR ekranında satılır)
+- **[Fabianens Mod Market](https://github.com/universesofcyberpunk/anime-shop-simulator-mod-market) 1.4.0** veya üstü (lisans ve figürler MODLAR ekranında satılır)
 
 ### Kullanım
 
