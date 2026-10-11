@@ -7,3 +7,5 @@ settings.json
 *.exe
 __pycache__/
 *.pyc
+FigureShop/bin/
+FigureShop/obj/

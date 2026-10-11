@@ -4,9 +4,13 @@ Turn any 3D model (GLB, GLTF, Sketchfab zip, FBX, OBJ, BLEND) into a figure pack
 Anime Shop Simulator. The figure is sold in your shop as a loose
 figure and as a gift box figure. Windows only. Made by **Fabianens**.
 
+This repository holds both halves: the **Figure Maker** app (Python) and the source of the **FigureShop** MelonLoader
+mod that loads the packs in the game (`FigureShop/`, C#).
+
 - [Install the ready exe](#install-the-ready-exe)
 - [Run from source](#run-from-source)
 - [Build the exe yourself](#build-the-exe-yourself)
+- [FigureShop mod (source)](#figureshop-mod-source)
 - [How to use (full guide, English + Türkçe)](#english)
 
 ## Install the ready exe
@@ -51,6 +55,33 @@ The single-file exe is written to `dist\FigureMaker.exe`. Use a clean venv (only
 so the exe stays small. `tools\` is bundled inside the exe; `lang\`, `out\`, `work\` and `settings.json` are created
 next to the exe on first use and are not part of the repository.
 
+## FigureShop mod (source)
+
+`FigureShop/` is the in-game half: a MelonLoader 0.7.x mod (net6.0, IL2CPP) that reads every pack folder in
+`UserData\FigureShop`, registers each figure as a loose and a boxed product with its own licence on the
+**Fabianens Mod Market** MODS screen, and builds the 3D model from `model.skin` at the pose frame in `figure.json`.
+Players normally get the ready `FigureShop.dll` from Nexus Mods; build it yourself like this:
+
+1. Install the [.NET 6 SDK or newer](https://dotnet.microsoft.com/download) and run the game once with MelonLoader 0.7.x
+   (that generates `MelonLoader\Il2CppAssemblies`, which the project references).
+2. Build:
+
+```bat
+cd FigureShop
+dotnet build -c Release
+:: game not in the default Steam folder?
+dotnet build -c Release -p:GameDir="D:\Games\Anime Shop Simulator"
+```
+
+The DLL is copied to the game's `Mods` folder. Close the game first, the file is locked while it runs.
+The game's own DLLs are not in this repository; they come from your install.
+
+| File | What it is |
+|---|---|
+| `FigureShop/FigureShop.cs` | mod entry, pack loading, product and licence registration, shelf and box display |
+| `FigureShop/Figures.cs` | `figure.json` reader and pack catalogue |
+| `FigureShop/SkinModel.cs` | `model.skin` loader: mesh, skinning and the chosen pose frame |
+
 ## Repository layout
 
 | Path | What it is |
@@ -62,9 +93,10 @@ next to the exe on first use and are not part of the repository.
 | `tools/fbx2glb.py` | runs inside Blender to turn FBX / OBJ / BLEND into GLB |
 | `tools/gl.py`, `tools/rd.py` | glTF math helpers, `model.skin` reader |
 | `FigureMaker.spec` | PyInstaller recipe for the exe |
+| `FigureShop/` | source of the FigureShop mod that loads the packs in the game |
 
 Only share figure packs of models whose licence allows it; the tool copies the model's credits into `license.txt`.
-Code licence: MIT (see `LICENSE`).
+Code licence (Figure Maker and FigureShop): MIT, see `LICENSE`. If you reuse the code, credit **Fabianens**.
 
 ---
 
