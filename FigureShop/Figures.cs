@@ -3,6 +3,8 @@
 // Fabi Figures lisansinin altina eklenir. Her figur Mod Ayarlari (F10) > FigureShop sayfasinda kendi ac/kapa anahtarini alir.
 // Marin (klasor "Marin") eski sabit ID'lerini ve ayarlarini korur; diger figurlerin ID'leri klasor adindan sabit uretilir.
 // Kapali figur: oyunda kayitli kalir (rafta/depoda olanlar bozulmaz) ama lisansin urunu degildir, magazada listelenmez.
+// 1.4.0: bilinen figurler UserData\FigureShop\_known_figures.txt'de (klasor -> ID'ler, adlar). Klasoru silinen figur
+// "kaldirildi" yer tutucusu olarak kurulur (oyunun figur gorunumu, ayni ID'ler): kayitlardaki raflar/depo bozulmaz, satilabilir.
 
 using System;
 using System.Collections.Generic;
@@ -20,7 +22,7 @@ namespace FigureShop
         internal class Fig
         {
             public string Folder, Dir, Slug;
-            public bool IsMarin;
+            public bool IsMarin, Missing;                     // 1.4.0: Missing = klasoru silinmis (yer tutucu)
             public int FigPickupId, FigProductId, BoxPickupId, BoxProductId;
             public string FigKey, BoxKey;
             public Func<string> NameEn, NameTr, BoxNameEn, BoxNameTr;
@@ -31,7 +33,7 @@ namespace FigureShop
             public PickupDefinition FigPickup, BoxPickup;
             public ProductDefinition FigProd, BoxProd;
             public Lic Lic;                                  // null = Fabi Figures (varsayilan)
-            public bool On => Enabled == null || Enabled.Value;
+            public bool On => !Missing && (Enabled == null || Enabled.Value);
         }
 
         // 1.3: kendi lisansi olan paketler (figure.json "licence" nesnesi). Ayni ada sahip paketler ayni lisansi paylasir.
@@ -186,24 +188,119 @@ namespace FigureShop
             catch { }
         }
 
+        // 1.4.0: yayinlanan figur paketindeki klasorler (Fabianens Figure Shop - New Figures). Bilinen figur listesi ilk kez
+        // olusturulurken paketten en az bir klasor varsa hepsi eklenir: daha once silinen paket figurleri de ayni ID'lerle geri gelir.
+        static readonly string[] PackFolders = {
+            "16", "3DAISTOCK", "AI_GIRL", "A_Salsa_Dance", "Angel_Girl_1", "Anime_Girl_Figure_Image_To_3D_SupaVoxel", "Anime_Girl_Nieko",
+            "Anime_Gothic_Princess_PNG_To_STL_SupaVox", "Bikini_Agent_Sylvia_Brown_Dust_2", "Blonde_Anime_Gunslinger_PNG_To_STL_SupaV",
+            "Blue_Hairedgirl3dmodel", "Busty_Girl_2166fcba9ded4ee075f3298da6319", "Busty_Girl_66268007c908df979ac3682181449",
+            "Busty_Girl_76d19e40cd44f3d395419e5898117", "Busty_Girl_Bent_Over", "Cheongsam_Model", "Cheongsam_Model_2", "Crimson_Empress",
+            "Crimson_Silk_Empress", "Dancing_Girl_From_Fire_Emblem_If", "Dark_Haired_Anime_Heroine_PNG_To_STL_Sup", "Dead_Or_Alive_Cheongsam_Honoka",
+            "Dragonewt_Temptation", "Eb38d03f8f2f4f0f10d57a32171f1cb1_badly_M", "Fantasy_Queen", "Ghost_Of_Plenty_Halloween2025", "Goddess_Snowboard",
+            "Hooters_Chi_Chi", "Hooters_Yor", "Hornet_Hollow_Knight", "In_Underwear", "Jessy", "Marin", "Milk_Sentada_Dragon_Ball_Modelo_3D_Sexy_",
+            "Modelo_3D_Chica_Rubia_Realista_Nude_Sexy", "Modelo_3D_De_Chica_Con_Cabello_Blanco_Se", "Oguri_Cap_Uma_Musume", "Pirate_Queen",
+            "Pirate_S_Treasure", "Pole_Dance", "Purple_Haired_Anime_Lady_PNG_To_STL_Supa", "Queen_Charm", "Rebecca_Cyberpunk",
+            "Redhead_Anime_Swordswoman_PNG_To_STL_Sup", "Rei_Ayanami", "Scarred_Warrior_With_Crimson_Blade", "Selene_Hart_Cross_Legged_Pose",
+            "Stylized_Cyberpunk_Anime_Catgirl_Mecha_3", "Teal_Haired_Anime_Girl_PNG_To_STL_SupaVo", "The_Ring_Ghost_Lady", "Torn_Cloth_Girl", "Veera", "W" };
+
+        internal class Known { public string Folder, En, Tr, BoxEn, BoxTr; public int[] Ids; }
+        static string KnownFile => Path.Combine(_dataDir, "_known_figures.txt");
+
+        static Dictionary<string, Known> LoadKnown()
+        {
+            var d = new Dictionary<string, Known>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (!File.Exists(KnownFile)) return d;
+                foreach (var raw in File.ReadAllLines(KnownFile, Encoding.UTF8))
+                {
+                    if (raw.Length == 0 || raw.StartsWith("#")) continue;
+                    var c = raw.Split('\t');
+                    if (c.Length < 5 || c[0].Length == 0) continue;
+                    var ids = new int[4]; bool ok = true;
+                    for (int i = 0; i < 4; i++) ok &= int.TryParse(c[1 + i], out ids[i]);
+                    if (!ok) continue;
+                    string At(int i) => c.Length > i && c[i].Length > 0 ? c[i] : null;
+                    d[c[0]] = new Known { Folder = c[0], Ids = ids, En = At(5), Tr = At(6), BoxEn = At(7), BoxTr = At(8) };
+                }
+            }
+            catch (Exception e) { Log.Warning("_known_figures.txt okunamadi: " + e.Message); }
+            return d;
+        }
+
+        static void SaveKnown(Dictionary<string, Known> d)
+        {
+            try
+            {
+                var sb = new StringBuilder("# FigureShop: figures this game has seen (folder, IDs, names). Do not edit or delete.\n" +
+                    "# A figure whose folder is deleted stays in the game as a \"(removed)\" placeholder so saved shelves keep working.\n");
+                foreach (var k in d.Values.OrderBy(x => x.Folder, StringComparer.OrdinalIgnoreCase))
+                {
+                    var cols = new List<string> { k.Folder };
+                    cols.AddRange(k.Ids.Select(x => x.ToString()));
+                    cols.AddRange(new[] { k.En, k.Tr, k.BoxEn, k.BoxTr }.Select(x => (x ?? "").Replace('\t', ' ')));
+                    sb.Append(string.Join("\t", cols)).Append('\n');
+                }
+                File.WriteAllText(KnownFile, sb.ToString(), new UTF8Encoding(false));
+            }
+            catch (Exception e) { Log.Warning("_known_figures.txt yazilamadi: " + e.Message); }
+        }
+
+        // klasor adindan sabit ID (cakisirsa sonraki bos yuva); Marin eski sabit ID'leri
+        static int[] AssignIds(string folder, HashSet<int> used)
+        {
+            int[] ids = null;
+            if (folder.Equals("Marin", StringComparison.OrdinalIgnoreCase)) ids = new[] { FigPickupId, FigProductId, BoxPickupId, BoxProductId };
+            else
+            {
+                int slot = (int)(Fnv(folder) % PackSlots);
+                for (int tries = 0; tries < PackSlots; tries++, slot = (slot + 1) % PackSlots)
+                {
+                    int b = PackIdBase + slot * 10;
+                    if (!used.Contains(b + 1) && !used.Contains(b + 2) && !used.Contains(b + 3) && !used.Contains(b + 4)) { ids = new[] { b + 1, b + 2, b + 3, b + 4 }; break; }
+                }
+            }
+            foreach (var id in ids) used.Add(id);
+            return ids;
+        }
+
+        static IEnumerable<string> FolderOrder(IEnumerable<string> names) =>
+            names.OrderBy(n => n.Equals("Marin", StringComparison.OrdinalIgnoreCase) ? 0 : 1).ThenBy(n => n, StringComparer.OrdinalIgnoreCase);
+
+        static string Pretty(string folder) => folder.Replace('_', ' ').Trim();
+
         // UserData\FigureShop altindaki figur klasorlerini bul (OnInitializeMelon'da, oyun yuklenmeden once)
         static void DiscoverFigures(MelonPreferences_Category cat)
         {
             _figs.Clear(); _ourIds.Clear(); _ourProductIds.Clear(); _lics.Clear(); _licIds.Clear();
-            var dirs = Directory.GetDirectories(_dataDir)
-                .Where(d => !Path.GetFileName(d).StartsWith("_"))
-                .OrderBy(d => Path.GetFileName(d).Equals("Marin", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
-                .ThenBy(d => Path.GetFileName(d), StringComparer.OrdinalIgnoreCase).ToList();
+            var dirs = FolderOrder(Directory.GetDirectories(_dataDir).Select(Path.GetFileName).Where(n => !n.StartsWith("_")))
+                .Select(n => Path.Combine(_dataDir, n)).ToList();
+            foreach (var dir in dirs.Where(d => !File.Exists(Path.Combine(d, "model.skin"))))
+                Log.Warning($"Figur klasoru '{Path.GetFileName(dir)}': model.skin yok, atlandi.");
+            dirs = dirs.Where(d => File.Exists(Path.Combine(d, "model.skin"))).ToList();
+
+            // 1.4.0: bilinen figurler ve ID'leri. Ilk acilista eski surumlerin dagitimi ayni sirayla yeniden uretilir (ID'ler degismez).
+            var known = LoadKnown();
             var used = new HashSet<int> { BrandId };
+            bool knownChanged = false;
+            if (known.Count == 0)
+            {
+                var names = new HashSet<string>(dirs.Select(Path.GetFileName), StringComparer.OrdinalIgnoreCase);
+                if (names.Any(n => PackFolders.Contains(n, StringComparer.OrdinalIgnoreCase))) names.UnionWith(PackFolders);
+                foreach (var n in FolderOrder(names)) known[n] = new Known { Folder = n, Ids = AssignIds(n, used) };
+                knownChanged = true;
+            }
+            else foreach (var k in known.Values) foreach (var id in k.Ids) used.Add(id);
+
             foreach (var dir in dirs)
             {
                 string folder = Path.GetFileName(dir);
-                if (!File.Exists(Path.Combine(dir, "model.skin"))) { Log.Warning($"Figur klasoru '{folder}': model.skin yok, atlandi."); continue; }
+                if (!known.TryGetValue(folder, out var kn)) { kn = new Known { Folder = folder, Ids = AssignIds(folder, used) }; known[folder] = kn; knownChanged = true; }
                 var f = new Fig { Folder = folder, Dir = dir, Slug = Slug(folder), IsMarin = folder.Equals("Marin", StringComparison.OrdinalIgnoreCase) };
+                f.FigPickupId = kn.Ids[0]; f.FigProductId = kn.Ids[1]; f.BoxPickupId = kn.Ids[2]; f.BoxProductId = kn.Ids[3];
                 if (f.IsMarin)
                 {
                     // eski surumlerle ayni ID/anahtar/ayarlar (kayitlar bozulmasin)
-                    f.FigPickupId = FigPickupId; f.FigProductId = FigProductId; f.BoxPickupId = BoxPickupId; f.BoxProductId = BoxProductId;
                     f.FigKey = FigKey; f.BoxKey = BoxKey;
                     f.NameEn = () => _figName.Value; f.NameTr = () => _figNameTr.Value;
                     f.BoxNameEn = () => _boxName.Value; f.BoxNameTr = () => _boxNameTr.Value;
@@ -221,13 +318,6 @@ namespace FigureShop
                     f.NameEn = () => en; f.NameTr = () => tr; f.BoxNameEn = () => ben; f.BoxNameTr = () => btr;
                     f.Scale = F(c, "Scale", 1f); f.RotY = F(c, "RotationY", 0f); f.Pose = S(c, "Pose", ""); f.PoseTime = F(c, "PoseTime", 0f); f.PoseFrame = (int)F(c, "PoseFrame", -1f);
                     f.FigBase = F(c, "BasePrice", 0f); f.BoxBase = F(c, "BoxedBasePrice", 0f);
-                    // klasor adindan sabit ID (cakisirsa sonraki bos yuva)
-                    int slot = (int)(Fnv(folder) % PackSlots);
-                    for (int tries = 0; tries < PackSlots; tries++, slot = (slot + 1) % PackSlots)
-                    {
-                        int b = PackIdBase + slot * 10;
-                        if (!used.Contains(b + 1) && !used.Contains(b + 2) && !used.Contains(b + 3) && !used.Contains(b + 4)) { f.FigPickupId = b + 1; f.FigProductId = b + 2; f.BoxPickupId = b + 3; f.BoxProductId = b + 4; break; }
-                    }
                     f.FigKey = "FigureShop/fig_" + f.Slug; f.BoxKey = "FigureShop/fig_" + f.Slug + "_boxed";
                     // lisans: bos / "Fabi Figures" = bizim lisans; baska ad = kendi lisansi (Figure Maker formu)
                     string ln = S(c, "licence.name", c.TryGetValue("licence", out var lv) ? lv : "");
@@ -250,15 +340,41 @@ namespace FigureShop
                     }
                     if (c.TryGetValue("credits.title", out var ct) && ct.Length > 0) Log.Msg($"{folder}: \"{ct}\" by {S(c, "credits.author", "?")}, {S(c, "credits.license", "?")} {S(c, "credits.source", "")}");
                 }
-                foreach (var id in new[] { f.FigPickupId, f.FigProductId, f.BoxPickupId, f.BoxProductId }) { used.Add(id); _ourIds.Add(id); }
-                _ourProductIds.Add(f.FigProductId); _ourProductIds.Add(f.BoxProductId);
+                // klasor silinirse yer tutucunun adlari
+                string[] nm = { f.NameEn(), f.NameTr(), f.BoxNameEn(), f.BoxNameTr() };
+                if (kn.En != nm[0] || kn.Tr != nm[1] || kn.BoxEn != nm[2] || kn.BoxTr != nm[3]) { kn.En = nm[0]; kn.Tr = nm[1]; kn.BoxEn = nm[2]; kn.BoxTr = nm[3]; knownChanged = true; }
+                AddFig(f);
                 // Mod Ayarlari'nda ac/kapa (ModSettings MelonPreferences girdilerini kendiliginden listeler)
                 f.Enabled = cat.CreateEntry("Figure_" + f.Slug, true, "Figure: " + f.NameEn(),
                     $"Sell '{f.NameEn()}' (loose + gift box) under the Fabi Figures licence. Off = hidden from the shop; ones already in the shop stay. Restart needed.");
-                _figs.Add(f);
             }
+
+            // 1.4.0: klasoru silinen figurler ayni ID'lerle yer tutucu olur (oyunun figur gorunumu): magazada yok, kayitlardakiler satilabilir
+            var present = new HashSet<string>(dirs.Select(Path.GetFileName), StringComparer.OrdinalIgnoreCase);
+            var ghosts = new List<string>();
+            foreach (var kn in known.Values.Where(k => !present.Contains(k.Folder)).OrderBy(k => k.Folder, StringComparer.OrdinalIgnoreCase))
+            {
+                var f = new Fig { Folder = kn.Folder, Dir = Path.Combine(_dataDir, kn.Folder), Slug = Slug(kn.Folder), Missing = true,
+                                  IsMarin = kn.Folder.Equals("Marin", StringComparison.OrdinalIgnoreCase) };
+                f.FigPickupId = kn.Ids[0]; f.FigProductId = kn.Ids[1]; f.BoxPickupId = kn.Ids[2]; f.BoxProductId = kn.Ids[3];
+                f.FigKey = f.IsMarin ? FigKey : "FigureShop/fig_" + f.Slug; f.BoxKey = f.IsMarin ? BoxKey : "FigureShop/fig_" + f.Slug + "_boxed";
+                string en = (kn.En ?? Pretty(kn.Folder) + " Figure") + " (removed)", tr = (kn.Tr ?? Pretty(kn.Folder) + " Figürü") + " (kaldırıldı)";
+                string ben = (kn.BoxEn ?? Pretty(kn.Folder) + " Gift Box Figure") + " (removed)", btr = (kn.BoxTr ?? Pretty(kn.Folder) + " Kutulu Hediye Figür") + " (kaldırıldı)";
+                f.NameEn = () => en; f.NameTr = () => tr; f.BoxNameEn = () => ben; f.BoxNameTr = () => btr;
+                AddFig(f);
+                ghosts.Add(kn.Folder);
+            }
+            if (knownChanged) SaveKnown(known);
             foreach (var l in _lics) Log.Msg($"Kendi lisansi: '{l.Name}' (ID {l.Id}, fiyat {l.Price}, seviye {l.Level}) - figurler: {string.Join(", ", l.Figs.Select(x => x.Folder))}");
-            Log.Msg($"Figurler: {_figs.Count} bulundu - " + string.Join(", ", _figs.Select(x => $"{x.Folder} ({(x.On ? "acik" : "kapali")}, {x.FigPickupId})")));
+            Log.Msg($"Figurler: {_figs.Count(x => !x.Missing)} bulundu - " + string.Join(", ", _figs.Where(x => !x.Missing).Select(x => $"{x.Folder} ({(x.On ? "acik" : "kapali")}, {x.FigPickupId})")));
+            if (ghosts.Count > 0) Log.Msg($"Removed figures kept as placeholders (folder deleted, saved items keep working): {ghosts.Count} - {string.Join(", ", ghosts)}");
+        }
+
+        static void AddFig(Fig f)
+        {
+            foreach (var id in new[] { f.FigPickupId, f.FigProductId, f.BoxPickupId, f.BoxProductId }) _ourIds.Add(id);
+            _ourProductIds.Add(f.FigProductId); _ourProductIds.Add(f.BoxProductId);
+            _figs.Add(f);
         }
     }
 }

@@ -181,6 +181,31 @@ def prim_data(g, pr, mi):
     return P, N, U, I
 
 
+def vertex_colors(g, pr):
+    """COLOR_0 -> (n,4) lineer 0..1 ya da None"""
+    if 'COLOR_0' not in pr['attributes']: return None
+    ai = pr['attributes']['COLOR_0']; a = g.j['accessors'][ai]
+    C = g.acc(ai).astype(np.float64)
+    ct = a['componentType']
+    if ct == 5121: C /= 255.0
+    elif ct == 5123: C /= 65535.0
+    if C.shape[1] == 3: C = np.c_[C, np.ones(len(C))]
+    return np.clip(C, 0, 1)
+
+
+def has_base_texture(g, mi):
+    if mi is None: return False
+    m = g.j['materials'][mi]
+    if m.get('pbrMetallicRoughness', {}).get('baseColorTexture'): return True
+    if m.get('extensions', {}).get('KHR_materials_pbrSpecularGlossiness', {}).get('diffuseTexture'): return True
+    return 'emissiveTexture' in m
+
+
+def lin2srgb(c):
+    c = np.clip(c, 0, 1)
+    return np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1 / 2.4) - 0.055)
+
+
 def calc_normals(P, I):
     N = np.zeros_like(P)
     t = I.reshape(-1, 3)
@@ -497,6 +522,7 @@ def convert_anim(src, outdir, clips, height=None, size=None, maxtex=2048, fps=30
             mi = pr.get('material')
             P, N, U, I = prim_data(g, pr, mi)
             if N is None: N = calc_normals(P, I)
+            C = vertex_colors(g, pr)
             if 'skin' in n and 'JOINTS_0' in pr['attributes']:
                 J, W = joints_weights(g, pr); si = skin_map[n['skin']]
                 nj = len(skins[si][0]); J = np.clip(J, 0, nj - 1)
@@ -510,6 +536,7 @@ def convert_anim(src, outdir, clips, height=None, size=None, maxtex=2048, fps=30
                         if np.abs(P2.min(0) - lo0).max() > 0.05 * ext0 or np.abs(P2.max(0) - hi0).max() > 0.05 * ext0:
                             raise RuntimeError('decimated geometry does not line up with the source (%s)' % n.get('name'))
                         _, idx = cKDTree(P).query(P2)
+                        if C is not None: C = C[idx]
                         P, N, U, I, J, W = P2, N2, U2, I2, J[idx], W[idx]
             else:
                 if ovr is not None and n.get('name') in ovr:
@@ -521,10 +548,11 @@ def convert_anim(src, outdir, clips, height=None, size=None, maxtex=2048, fps=30
                         lo0, hi0 = P.min(0), P.max(0); ext0 = max(float((hi0 - lo0).max()), 1e-9)
                         if np.abs(P2.min(0) - lo0).max() > 0.05 * ext0 or np.abs(P2.max(0) - hi0).max() > 0.05 * ext0:
                             raise RuntimeError('decimated geometry does not line up with the source (%s)' % n.get('name'))
+                        if C is not None: C = C[cKDTree(P).query(P2)[1]]
                         P, N, U, I = P2, N2, U2, I2
                 si = len(skins); skins.append(([i], np.eye(4)[None]))
                 J = np.zeros((len(P), 4), np.int64); W = np.zeros((len(P), 4)); W[:, 0] = 1
-            meshes.append(dict(node=i, mi=mi, P=P, N=N, U=U, I=I, J=J, W=W, skin=si))
+            meshes.append(dict(node=i, mi=mi, P=P, N=N, U=U, I=I, J=J, W=W, skin=si, C=C))
 
     # bounds: kare 0 (bounds_clip)
     an0 = j['animations'][clips[bounds_clip][0]] if clips else None
@@ -568,6 +596,32 @@ def convert_anim(src, outdir, clips, height=None, size=None, maxtex=2048, fps=30
             chans.append((n, path, v.astype('<f4')))
         clip_data.append((name, fps, frames, chans))
 
+    # malzemeler; dokusuz + kose renkli parcalar ortak bir renk dokusuna pisirilir (1.3.1)
+    mats = [material(g, m['mi'], tex, {'skin': True}) for m in meshes]
+    vc = []
+    for m, mat in zip(meshes, mats):
+        C = m.get('C')
+        if C is None or has_base_texture(g, m['mi']) or len(m['I']) == 0: continue
+        if np.abs(C[:, :3] - 1).max() <= 0.02: continue            # beyaz: rengi degistirmez
+        if np.ptp(C[:, :3], 0).max() <= 0.02:                       # tek renk: doku gerekmez
+            mat['texture'] = tex.color(list(lin2srgb(C[0, :3] * np.array(mat['bc'][:3])))); continue
+        vc.append((m, mat))
+    if vc:
+        # renk dokusu poligon azaltmadan SONRA pisirilir (standalone.finish_vcol): burada parcalar ortak bir doku adi alir
+        # (azaltma ayni dokulu parcalari birlestirir) ve kaynak renkler _vcol.npz'ye yazilir
+        n = tex._name('vertex_colors', '.png'); side = {}
+        for k, (m, mat) in enumerate(vc):
+            mat['texture'] = n
+            P, _, _ = to_unity(m['P'], m['N'], m['I'])
+            side['P%d' % k] = P.astype(np.float32); side['J%d' % k] = m['J'].astype(np.int32); side['W%d' % k] = m['W'].astype(np.float32)
+            side['C%d' % k] = (m['C'][:, :3] * np.array(mat['bc'][:3])[None]).astype(np.float32); side['S%d' % k] = np.array([m['skin']])
+        np.savez_compressed(os.path.join(outdir, '_vcol.npz'), tex=np.array([n]), n=np.array([len(vc)]), **side)
+    used = {mat['texture'].lower() for mat in mats}
+    for f in os.listdir(outdir):
+        if f.lower().startswith('color_') and f.lower().endswith('.png') and f.lower() not in used:
+            try: os.remove(os.path.join(outdir, f))
+            except OSError: pass
+
     path = os.path.join(outdir, 'model.skin')
     tris = 0
     with open(path, 'wb') as f:
@@ -583,8 +637,7 @@ def convert_anim(src, outdir, clips, height=None, size=None, maxtex=2048, fps=30
             for k in range(len(jn)):
                 f.write((FLIP @ ib[k] @ FLIP).astype('<f4').ravel().tobytes())   # satir satir
         f.write(struct.pack('<i', len(meshes)))
-        for m in meshes:
-            mat = material(g, m['mi'], tex, {'skin': True})
+        for m, mat in zip(meshes, mats):
             wstr(f, mat['name']); wstr(f, mat['texture'])
             f.write(bytes([mat['alpha'], 1 if mat['ds'] else 0])); f.write(struct.pack('<i', m['skin']))
             P, N, I = to_unity(m['P'], m['N'], m['I'])

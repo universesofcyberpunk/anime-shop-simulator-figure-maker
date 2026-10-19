@@ -37,7 +37,7 @@ using ProductDB = Il2CppProject.Code.Core.Utils.DataDefinition.DataDefinition<Il
 using DefType = Il2CppProject.Code.Gameplay.Definitions.PickupType;
 using NV3 = System.Numerics.Vector3;
 
-[assembly: MelonInfo(typeof(FigureShop.Core), "FigureShop", "1.3.3", "Fabianens")]
+[assembly: MelonInfo(typeof(FigureShop.Core), "FigureShop", "1.4.0", "Fabianens")]
 [assembly: MelonGame("OneMoreTime", "Anime Shop Simulator")]
 
 namespace FigureShop
@@ -62,7 +62,9 @@ namespace FigureShop
         static MelonPreferences_Entry<string> _brandName, _brandNameTr, _figName, _figNameTr, _boxName, _boxNameTr, _pose;
         static MelonPreferences_Entry<float> _brandPrice, _scale, _rotY, _poseTime, _figBase, _boxBase;
         static MelonPreferences_Entry<int> _brandLevel, _srcBrand, _srcFig, _srcBox;
-        static MelonPreferences_Entry<bool> _logCatalog, _flipBox, _unpriced;
+        static MelonPreferences_Entry<bool> _logCatalog, _flipBox, _unpriced, _shadows;
+        static MelonPreferences_Entry<int> _maxTex;
+        static MelonPreferences_Entry<float> _detail;
 
         static string _dataDir, _figDir;
         static bool _built, _failed, _building;
@@ -110,6 +112,10 @@ namespace FigureShop
             _flipBox = cat.CreateEntry("FlipGiftBox", false, "Turn the gift box 180 degrees (restart needed)");
             _logCatalog = cat.CreateEntry("LogCatalog", true, "Write the vanilla licence/figure catalog to the log once (also saved to UserData\\FigureShop\\catalog.txt)");
             _unpriced = cat.CreateEntry("StartUnpriced", true, "Figures are never priced when first put on a shelf: the tag stays empty until the player sets a price");
+            // 1.4.0 (performans): dokular kucuk ve sikistirilmis, raftaki figurler uzaklastikca daha az poligonla cizilir
+            _maxTex = cat.CreateEntry("MaxTextureSize", 1024, "Largest figure texture side in pixels; textures are also compressed (512 = less video memory, 2048 = sharper; restart needed)");
+            _detail = cat.CreateEntry("DetailDistance", 1f, "How far figures on shelves keep full detail (1 = default, 2 = twice as far but more GPU load, 0.5 = faster)");
+            _shadows = cat.CreateEntry("FigureShadows", true, "Figures on shelves cast shadows (off = less GPU load)");
 
             _dataDir = Path.Combine(MelonEnvironment.UserDataDirectory, "FigureShop");
             _figDir = Path.Combine(_dataDir, FigureFolder);
@@ -283,7 +289,7 @@ namespace FigureShop
             go.AddComponent<MeshFilter>().sharedMesh = mf.sharedMesh;
             var r = go.AddComponent<MeshRenderer>();
             r.sharedMaterials = main.sharedMaterials;
-            r.shadowCastingMode = main.shadowCastingMode;
+            r.shadowCastingMode = _shadows.Value ? main.shadowCastingMode : ShadowCastingMode.Off;
             r.receiveShadows = main.receiveShadows;
             r.enabled = false;
         }
@@ -307,7 +313,7 @@ namespace FigureShop
                 // 1.1: sadece MODLAR ekraninda, kendi kategorilerinde (lisans: Licences, figurler: Figures)
                 m.Invoke(null, new object[] { BrandId, "Licences", true });
                 foreach (var l in _lics) m.Invoke(null, new object[] { l.Id, "Licences", true });
-                foreach (var fg in _figs) foreach (var id in new[] { fg.FigPickupId, fg.BoxPickupId }) m.Invoke(null, new object[] { id, "Figures", true });
+                foreach (var fg in _figs.Where(x => !x.Missing)) foreach (var id in new[] { fg.FigPickupId, fg.BoxPickupId }) m.Invoke(null, new object[] { id, "Figures", true });
                 LoggerInstance.Msg("Mod Market: licence and figures listed only on the MODS screen (Licences / Figures).");
             }
             catch (Exception e) { LoggerInstance.Warning("Mod Market registration: " + e.Message); }
@@ -321,7 +327,13 @@ namespace FigureShop
 
         // Rafta oyun urunun kendi renderer'ini kapatir (GPUI cizsin diye). Bizim urunler GPUI'de olmadigi icin o an kopyayi gosteriyoruz.
         // Kutu icindeyken (siparis kutusu) ve elde/odakta (ana renderer acik) kopya kapali.
-        static readonly List<(ProductItem item, MeshRenderer main, MeshRenderer copy, bool on)> _drawn = new();
+        // 1.4.0: kopya (ve kutulu figurdeki figur parcasi) ekrandaki boyuna gore az poligonlu LOD mesh'lerine gecer, cok uzakta kopya cizilmez.
+        internal class Drawn { public ProductItem Item; public MeshRenderer Main, Copy; public bool On; public readonly List<LodTarget> Lods = new(); }
+        internal class LodTarget { public MeshFilter Mf; public MeshRenderer R; public Transform T; public LodSet Set; public bool IsCopy; public int Level; public float H; }
+        internal class LodSet { public readonly Mesh[] Meshes = new Mesh[3]; public float Height; }
+        static readonly Dictionary<IntPtr, LodSet> _lodByMesh = new();
+        const int LodVerts1 = 9000, LodVerts2 = 2200;
+        static readonly List<Drawn> _drawn = new();
         static readonly HashSet<IntPtr> _drawnPtrs = new();
         // 1.3.1 (takilma): sahne taramasi 1 sn yerine 30 sn'de bir (yedek). Rafa konan / yuklenen figurler SetProductInstancing
         // prefix'inden kuyruga girer ve bir sonraki karede listeye eklenir. Kopyasi henuz yoksa 10 sn boyunca tekrar denenir.
@@ -339,7 +351,7 @@ namespace FigureShop
                 _nextScan = now + 120f;
                 _spawnQueue.Clear(); _retry.Clear();
                 _drawnPtrs.Clear();
-                for (int i = 0; i < _drawn.Count; i++) _drawnPtrs.Add(_drawn[i].item.Pointer);
+                for (int i = 0; i < _drawn.Count; i++) _drawnPtrs.Add(_drawn[i].Item.Pointer);
                 foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<ProductItem>(), FindObjectsSortMode.None))
                 {
                     var pi = o?.TryCast<ProductItem>(); if (pi == null) continue;
@@ -380,11 +392,56 @@ namespace FigureShop
                 var d = _drawn[i];
                 try
                 {
-                    if (d.main.WasCollected || d.copy.WasCollected) { _drawn.RemoveAt(i); continue; }
-                    bool want = (!d.main.enabled || d.main.forceRenderingOff) && !d.item._isInsideBox;
-                    if (d.on != want) { d.copy.enabled = want; d.on = want; _drawn[i] = d; }
+                    if (d.Main.WasCollected || d.Copy.WasCollected) { _drawn.RemoveAt(i); continue; }
+                    bool want = (!d.Main.enabled || d.Main.forceRenderingOff) && !d.Item._isInsideBox;
+                    if (d.On != want) { d.On = want; d.Copy.enabled = want && !CopyCulled(d); }
                 }
                 catch { _drawn.RemoveAt(i); }
+            }
+            UpdateLods();
+        }
+
+        static bool CopyCulled(Drawn d) { foreach (var t in d.Lods) if (t.IsCopy) return t.Level >= 3; return false; }
+
+        // ekrandaki boy (yukseklik / gorus alani): buyukse tam model, kuculdukce LOD1 / LOD2, cok kucukse kopya cizilmez.
+        // Her karede en fazla 64 figur yeniden degerlendirilir (sirayla).
+        static Camera _cam; static float _nextCam; static int _lodCursor;
+        static void UpdateLods()
+        {
+            if (_drawn.Count == 0) return;
+            float now = Time.unscaledTime;
+            if ((_cam == null || _cam.WasCollected || !_cam.isActiveAndEnabled) && now >= _nextCam) { _nextCam = now + 1f; _cam = Camera.main; }
+            if (_cam == null || _cam.WasCollected) return;
+            var cp = _cam.transform.position;
+            float k = 2f * Mathf.Tan(_cam.fieldOfView * 0.5f * Mathf.Deg2Rad);
+            float bias = Mathf.Clamp(_detail.Value, 0.1f, 10f);
+            bool shadows = _shadows.Value;
+            int n = Math.Min(64, _drawn.Count);
+            for (int c = 0; c < n; c++)
+            {
+                if (_lodCursor >= _drawn.Count) _lodCursor = 0;
+                var d = _drawn[_lodCursor++];
+                for (int j = 0; j < d.Lods.Count; j++)
+                {
+                    var t = d.Lods[j];
+                    try
+                    {
+                        if (t.IsCopy && !d.On) continue;
+                        float dist = Vector3.Distance(cp, t.T.position);
+                        float frac = t.H / Math.Max(1e-4f, dist * k) * bias;
+                        int lvl = frac >= 0.25f ? 0 : frac >= 0.08f ? 1 : frac >= 0.012f ? 2 : 3;
+                        if (!t.IsCopy && lvl > 2) lvl = 2;   // kutudaki figur parcasini oyun yonetir: sadece mesh degisir
+                        if (lvl == t.Level) continue;
+                        if (lvl < 3)
+                        {
+                            t.Mf.sharedMesh = t.Set.Meshes[lvl];
+                            t.R.shadowCastingMode = shadows && lvl < 2 ? ShadowCastingMode.On : ShadowCastingMode.Off;
+                        }
+                        if (t.IsCopy && (lvl == 3) != (t.Level == 3)) t.R.enabled = d.On && lvl < 3;
+                        t.Level = lvl;
+                    }
+                    catch { }
+                }
             }
         }
 
@@ -395,9 +452,92 @@ namespace FigureShop
             var ct = main.transform.Find(DrawName); if (ct == null) return false;
             var copy = ct.GetComponent<MeshRenderer>(); if (copy == null) return false;
             IntPtr p = pi.Pointer;
-            _drawn.RemoveAll(d => d.item.Pointer == p);
-            _drawn.Add((pi, main, copy, copy.enabled));
+            _drawn.RemoveAll(x => x.Item.Pointer == p);
+            var d = new Drawn { Item = pi, Main = main, Copy = copy, On = copy.enabled };
+            // LOD hedefleri: kopya ve (kutulu figurde) kutunun icindeki figur parcasi; ana renderer (elde / odakta) hep tam model
+            try
+            {
+                var mainMf = main.GetComponent<MeshFilter>();
+                foreach (var mf in pi.GetComponentsInChildren<MeshFilter>(true))
+                {
+                    if (mf == null || (mainMf != null && mf.Pointer == mainMf.Pointer)) continue;
+                    var mesh = mf.sharedMesh; if (mesh == null || !_lodByMesh.TryGetValue(mesh.Pointer, out var set)) continue;
+                    var r = mf.GetComponent<MeshRenderer>(); if (r == null) continue;
+                    var t = new LodTarget { Mf = mf, R = r, T = mf.transform, Set = set, IsCopy = r.Pointer == copy.Pointer };
+                    t.Level = Array.IndexOf(set.Meshes, mesh); if (t.Level < 0) t.Level = 0;
+                    t.H = set.Height * Mathf.Abs(t.T.lossyScale.y);
+                    d.Lods.Add(t);
+                }
+            }
+            catch { }
+            _drawn.Add(d);
             return true;
+        }
+
+        // ------------------------------------------------------------------ LOD (1.4.0)
+        // Basit kume sadelestirme: model bir izgaraya bolunur, ayni hucredeki (ve ayni doku bolgesindeki) vertexler birlesir.
+        // Doku dikislerinde (UV adasi degisince) vertexler ayri kalir, boylece uzaktan bakinca dokular kaymaz.
+        internal struct LodData { public Vector3[] v, n; public Vector2[] uv; public List<int[]> subs; }
+
+        static LodData? Simplify(Vector3[] v, Vector3[] nrm, Vector2[] uv, List<int[]> subs, int target)
+        {
+            int count = v.Length;
+            if (count <= target * 1.15f) return null;
+            Vector3 lo = v[0], hi = v[0];
+            for (int i = 1; i < count; i++) { lo = Vector3.Min(lo, v[i]); hi = Vector3.Max(hi, v[i]); }
+            var size = hi - lo; float ext = Math.Max(size.x, Math.Max(size.y, size.z)); if (ext < 1e-6f) return null;
+            var cl = new int[count];
+            int res = (int)Math.Clamp(Math.Sqrt(target) * 1.6, 8, 1000), clusters = 0;
+            for (int iter = 0; iter < 8; iter++)
+            {
+                var map = new Dictionary<long, int>(target * 2);
+                float inv = res / ext; clusters = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    var p = v[i];
+                    long ix = Math.Clamp((int)((p.x - lo.x) * inv), 0, 1023), iy = Math.Clamp((int)((p.y - lo.y) * inv), 0, 1023), iz = Math.Clamp((int)((p.z - lo.z) * inv), 0, 1023);
+                    long ub = (long)Math.Floor(uv[i].x * 8f) & 1023, vb = (long)Math.Floor(uv[i].y * 8f) & 1023;
+                    long key = ix | iy << 10 | iz << 20 | ub << 30 | vb << 40;
+                    if (!map.TryGetValue(key, out int c)) { c = clusters++; map[key] = c; }
+                    cl[i] = c;
+                }
+                if (clusters <= target * 1.15f || res <= 8) break;
+                res = Math.Max(8, (int)(res * Math.Sqrt((double)target / clusters) * 0.97));
+            }
+            if (clusters >= count * 0.9f) return null;
+            var sp = new Vector3[clusters]; var sn = new Vector3[clusters]; var su = new Vector2[clusters]; var cnt = new int[clusters];
+            for (int i = 0; i < count; i++) { int c = cl[i]; sp[c] += v[i]; sn[c] += nrm[i]; su[c] += uv[i]; cnt[c]++; }
+            for (int c = 0; c < clusters; c++)
+            {
+                float w = 1f / cnt[c]; sp[c] *= w; su[c] *= w;
+                float l = sn[c].magnitude; sn[c] = l > 1e-6f ? sn[c] / l : Vector3.up;
+            }
+            var outSubs = new List<int[]>(subs.Count);
+            foreach (var tri in subs)
+            {
+                var o = new List<int>(tri.Length / 3);
+                for (int i = 0; i + 2 < tri.Length; i += 3)
+                {
+                    int a = cl[tri[i]], b = cl[tri[i + 1]], c = cl[tri[i + 2]];
+                    if (a == b || b == c || a == c) continue;
+                    o.Add(a); o.Add(b); o.Add(c);
+                }
+                outSubs.Add(o.ToArray());
+            }
+            return new LodData { v = sp, n = sn, uv = su, subs = outSubs };
+        }
+
+        static Mesh MakeMesh(LodData d, string name)
+        {
+            var mesh = new Mesh { name = name };
+            mesh.indexFormat = d.v.Length > 65000 ? IndexFormat.UInt32 : IndexFormat.UInt16;
+            mesh.vertices = d.v; mesh.normals = d.n; mesh.uv = d.uv;
+            mesh.subMeshCount = d.subs.Count;
+            for (int i = 0; i < d.subs.Count; i++) mesh.SetTriangles(d.subs[i], i, false);
+            mesh.RecalculateBounds();
+            mesh.UploadMeshData(true);   // CPU kopyasi tutulmaz
+            mesh.hideFlags = HideFlags.DontUnloadUnusedAsset;
+            return mesh;
         }
 
         public override void OnUpdate()
@@ -463,10 +603,11 @@ namespace FigureShop
                 _cur = f;
                 try
                 {
-                    var icon = LoadSprite(Path.Combine(f.Dir, "icon.png")) ?? LoadSprite(Path.Combine(f.Dir, "figure_icon.png"));
-                    var boxIcon = LoadSprite(Path.Combine(f.Dir, "box_icon.png")) ?? icon;
+                    // 1.4.0: klasoru silinmis figur (yer tutucu): model/ikon yok, oyunun figur gorunumu ve ikonu kalir
+                    var icon = f.Missing ? null : LoadSprite(Path.Combine(f.Dir, "icon.png")) ?? LoadSprite(Path.Combine(f.Dir, "figure_icon.png"));
+                    var boxIcon = f.Missing ? null : LoadSprite(Path.Combine(f.Dir, "box_icon.png")) ?? icon;
                     if (brandIcon == null) brandIcon = icon;
-                    var baked = BakeModel();
+                    var baked = f.Missing ? null : BakeModel();
                     f.FigProd = CloneProduct(_srcFigPickup.ProductDefinition, f.FigProductId, f.FigKey, icon, holder, f.Slug + "_Figure", baked, false);
                     // 1.1.3: kendi piyasa degeri (kopyalanan oyun figurunun degeri degil)
                     f.FigProd._basePrice = f.FigBase > 0 ? f.FigBase : AutoBase(f.FigKey, 34f, 62f);
@@ -617,10 +758,11 @@ namespace FigureShop
 
         static void BuildFigureVisual(GameObject go, ProductItem item, List<BakedPart> baked)
         {
-            if (baked == null) return;
             var mr = item != null ? item._meshRenderer : null;
             if (mr == null) mr = go.GetComponentInChildren<MeshRenderer>(true);
             if (mr == null) { Log.Warning("Figur prefab'inda MeshRenderer yok."); return; }
+            // modelsiz (yer tutucu): oyunun figuru kalir; GPUI'de olmadigi icin rafta yine kopya ile cizilir
+            if (baked == null) { AddDrawCopy(mr); return; }
             var target = RendererBounds(mr, go.transform);
             ReplaceWithModel(mr, go.transform, target, baked);
             // diger gorunur parcalari (varsa) gizle
@@ -746,7 +888,23 @@ namespace FigureShop
             var mats = new Il2CppReferenceArray<Material>(groups.Count);
             for (int i = 0; i < groups.Count; i++) mats[i] = MakeMaterial(baseMat, groups[i].first.Src);
             mr.sharedMaterials = mats;
-            mr.shadowCastingMode = ShadowCastingMode.On;
+            mr.shadowCastingMode = _shadows.Value ? ShadowCastingMode.On : ShadowCastingMode.Off;
+            // 1.4.0: uzak figurler icin az poligonlu kopyalar (raftaki cizim kopyasi uzakliga gore bunlara gecer)
+            try
+            {
+                var t0 = DateTime.Now;
+                var va = verts.ToArray(); var na = norms.ToArray(); var ua = uvs.ToArray();
+                var subs = groups.Select(g => g.idx.ToArray()).ToList();
+                var l1 = Simplify(va, na, ua, subs, LodVerts1);
+                var l2 = l1 != null ? Simplify(l1.Value.v, l1.Value.n, l1.Value.uv, l1.Value.subs, LodVerts2) : Simplify(va, na, ua, subs, LodVerts2);
+                var set = new LodSet { Height = mesh.bounds.size.y };
+                set.Meshes[0] = mesh;
+                set.Meshes[1] = l1 != null ? MakeMesh(l1.Value, mesh.name + "_LOD1") : mesh;
+                set.Meshes[2] = l2 != null ? MakeMesh(l2.Value, mesh.name + "_LOD2") : set.Meshes[1];
+                foreach (var lm in set.Meshes) _lodByMesh[lm.Pointer] = set;
+                Log.Msg($"LOD: {verts.Count} -> {set.Meshes[1].vertexCount} -> {set.Meshes[2].vertexCount} vertex ({(DateTime.Now - t0).TotalMilliseconds:0} ms)");
+            }
+            catch (Exception e) { Log.Warning("LOD: " + e.Message); }
             Log.Msg($"Model yerlestirildi: {mr.gameObject.name}, {verts.Count} vertex, {groups.Count} malzeme, olcek {s:0.0000}, hedef boyut {target.size}");
         }
 
@@ -794,10 +952,35 @@ namespace FigureShop
         static Texture2D LoadTexture(string p)
         {
             if (_texCache.TryGetValue(p, out var t)) return t;
-            if (!File.Exists(p)) { Log.Warning("Doku yok: " + p); _texCache[p] = null; return null; }
-            t = new Texture2D(2, 2, TextureFormat.RGBA32, true);
-            if (!ImageConversion.LoadImage(t, File.ReadAllBytes(p), true)) { Log.Warning("Doku okunamadi: " + p); t = null; }
-            else { t.name = Path.GetFileName(p); t.hideFlags = HideFlags.DontUnloadUnusedAsset; t.wrapMode = TextureWrapMode.Repeat; t.anisoLevel = 4; }
+            int max = Math.Max(64, _maxTex.Value);
+            // 1.4.0: onceden BC7'ye cevrilmis doku (<ad>.bc7, figur paketleri) dogrudan; yoksa resim kucultulup sikistirilir.
+            // Eskiden her doku sikistirilmamis RGBA32 ve tam boy yukleniyordu: 54 figur ~1,8 GB ekran karti bellegi.
+            t = Bc7Tex.Load(p, max);
+            if (t == null)
+            {
+                if (!File.Exists(p)) { Log.Warning("Doku yok: " + p); _texCache[p] = null; return null; }
+                t = new Texture2D(2, 2, TextureFormat.RGBA32, true);
+                if (!ImageConversion.LoadImage(t, File.ReadAllBytes(p), false)) { Log.Warning("Doku okunamadi: " + p); UnityEngine.Object.Destroy(t); t = null; }
+                else
+                {
+                    try
+                    {
+                        int lvl = 0;
+                        while (lvl < t.mipmapCount - 1 && Math.Max(t.width >> lvl, t.height >> lvl) > max) lvl++;
+                        if (lvl > 0)
+                        {
+                            var px = t.GetPixels32(lvl);
+                            var n = new Texture2D(Math.Max(1, t.width >> lvl), Math.Max(1, t.height >> lvl), t.format, true);
+                            n.SetPixels32(px); n.Apply(true, false);
+                            UnityEngine.Object.Destroy(t); t = n;
+                        }
+                        if (t.width % 4 == 0 && t.height % 4 == 0) t.Compress(true);
+                    }
+                    catch (Exception e) { Log.Warning("Doku sikistirilamadi: " + Path.GetFileName(p) + " - " + e.Message); }
+                    t.Apply(false, true);
+                }
+            }
+            if (t != null) { t.name = Path.GetFileName(p); t.hideFlags = HideFlags.DontUnloadUnusedAsset; t.wrapMode = TextureWrapMode.Repeat; t.anisoLevel = 4; }
             _texCache[p] = t;
             return t;
         }
@@ -811,13 +994,13 @@ namespace FigureShop
         {
             if (_iconsDone || !_built) return;
             _iconsDone = true;
-            foreach (var f in BuiltFigs)
+            foreach (var f in BuiltFigs.Where(x => !x.Missing))
             {
                 if (!File.Exists(Path.Combine(f.Dir, "icon.png"))) RenderIcon(f.FigProd, f.FigPickup, Path.Combine(f.Dir, "figure_icon.png"));
                 if (f.BoxProd != null) RenderIcon(f.BoxProd, f.BoxPickup, Path.Combine(f.Dir, "box_icon.png"));
             }
             // Figure Maker icin: icindeki figur olmadan hediye kutusu resmi + figurun duracagi alan (box_template.png/.json)
-            var tf = BuiltFigs.FirstOrDefault(x => x.BoxProd != null);
+            var tf = BuiltFigs.FirstOrDefault(x => x.BoxProd != null && !x.Missing);
             if (tf != null) RenderIcon(tf.BoxProd, null, Path.Combine(_dataDir, "box_template.png"), true);
         }
 

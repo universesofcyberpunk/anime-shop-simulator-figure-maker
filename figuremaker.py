@@ -736,7 +736,7 @@ def num(s, d):
     except Exception: return d
 
 
-VERSION = '1.3.0'
+VERSION = '1.3.1'
 MODEL_TYPES = ('.glb', '.gltf', '.fbx', '.obj', '.blend', '.zip')
 
 
@@ -791,6 +791,8 @@ def build(p, opt, a, folder=None):
     if r['tris'] > a.budget * 1.1:
         before, after = standalone.decimate_skin(os.path.join(out, 'model.skin'), a.budget)
         log(f'poligon azaltildi: {before} -> {after} ucgen'); r['tris'] = after
+    vt = standalone.finish_vcol(out)
+    if vt: log(f'kose renkleri dokuya pisirildi: {vt} ucgen')
     log(f'model.skin: {r["tris"]} ucgen, {r["parts"]} parca, olcu {r["dims"]}')
     if orient_m is not None: front, how_front = (0.0, 1.0), 'preview'   # on izlemede gorulen yuz musteriye bakar
     else: front, how_front = standalone.detect_front(out, frame)

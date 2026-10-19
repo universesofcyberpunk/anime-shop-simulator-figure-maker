@@ -318,3 +318,65 @@ def rotation_for(front):
     fx, fz = front
     a = math.degrees(math.atan2(fx, -fz))
     return float(round(a / 5.0) * 5.0) % 360.0
+
+
+# ------------------------------------------------------------------ kose renkleri (1.3.1)
+
+def _rest_world(d, m):
+    """parcanin vertexleri dinlenme pozunda (bind) model uzayinda"""
+    import gl
+    nodes = d['nodes']; Wn = [None] * len(nodes)
+    def w(i):
+        if Wn[i] is None:
+            name, par, T, R, Sc = nodes[i]
+            l = np.eye(4); l[:3, :3] = gl.q2m(np.array(R, float)) * np.array(Sc, float); l[:3, 3] = T
+            Wn[i] = l if par < 0 else w(par) @ l
+        return Wn[i]
+    J, B = d['skins'][int(m['sk'])]
+    M = np.stack([w(j) @ B[k] for k, j in enumerate(J)])
+    Mv = np.einsum('vk,vkij->vij', m['W'].astype(np.float64), M[np.clip(m['J'], 0, len(J) - 1)])
+    return np.einsum('vij,vj->vi', Mv[:, :3, :3], m['P'].astype(np.float64)) + Mv[:, :3, 3]
+
+
+def finish_vcol(modeldir):
+    """Dokusuz ama kose renkli (COLOR_0) parcalar: oyunun shader'i kose rengini kullanmaz (Hornet / The Ring Ghost Lady
+    bembeyaz cikiyordu). conv.convert_anim kaynak renkleri _vcol.npz'ye yazar; poligon azaltmadan sonra burada her ucgen
+    ortak dokuda kendi 4x4 blogunda duz renk olur (ucgenler ayrilir). Doku 1/4'e kadar kucultulse de blok ortasi ayni kalir."""
+    side = os.path.join(modeldir, '_vcol.npz')
+    if not os.path.exists(side): return 0
+    import rd
+    from scipy.spatial import cKDTree
+    z = np.load(side); name = str(z['tex'][0]); n = int(z['n'][0])
+    path = os.path.join(modeldir, 'model.skin')
+    d = rd.skin(path)
+    src = [dict(P=z['P%d' % k], J=z['J%d' % k], W=z['W%d' % k], sk=int(z['S%d' % k][0])) for k in range(n)]
+    SP = np.concatenate([_rest_world(d, m) for m in src]); SC = np.concatenate([z['C%d' % k] for k in range(n)])
+    z.close()
+    tree = cKDTree(SP)
+    pre, meshes, post = read_meshes(path)
+    vc = [m for m in meshes if m['tex'] == name]
+    total = sum(len(m['I']) // 3 for m in vc)
+    S = 64
+    while (S // 4) ** 2 < total: S *= 2
+    if S > 4096: S = 4096   # en fazla 1M ucgen; fazlasi son bloku paylasir
+    nb = S // 4
+    img = np.full((S, S, 3), 255, np.uint8); v = img.reshape(nb, 4, nb, 4, 3)
+    k0 = 0
+    for m in vc:
+        _, near = tree.query(_rest_world(d, m))
+        t = m['I'].reshape(-1, 3); nt = len(t)
+        col = SC[near][t].mean(1)
+        col = np.clip(col, 0, 1); col = np.where(col <= 0.0031308, col * 12.92, 1.055 * np.power(col, 1 / 2.4) - 0.055)
+        blk = np.clip(np.round(col * 255), 0, 255).astype(np.uint8)
+        k = np.minimum(np.arange(k0, k0 + nt), nb * nb - 1); bx, by = k % nb, k // nb
+        v[by, :, bx, :, :] = blk[:, None, None, :]
+        idx = t.ravel()
+        for kk in ('P', 'N', 'J', 'W'): m[kk] = m[kk][idx]
+        # model.skin'deki v zaten ters (1-v); goruntu satiri y=0 ustte -> v = 1 - (by*4+2)/S
+        m['U'] = np.repeat(np.c_[(bx * 4 + 2) / S, 1 - (by * 4 + 2) / S], 3, axis=0).astype(np.float32)
+        m['I'] = np.arange(len(idx), dtype=np.int32)
+        k0 += nt
+    write_meshes(path, pre, meshes, post)
+    Image.fromarray(img, 'RGB').save(os.path.join(modeldir, name), optimize=True)
+    os.remove(side)
+    return total
