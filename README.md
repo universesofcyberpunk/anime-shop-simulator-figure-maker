@@ -132,7 +132,7 @@ Code licence (Figure Maker and FigureShop): MIT, see `LICENSE`. If you reuse the
 | Project | What it does | Links |
 |---|---|---|
 | **Figure Maker + FigureShop** (this repository) | turn any 3D model into a shop figure (app) and the mod that sells it | [GitHub](https://github.com/universesofcyberpunk/anime-shop-simulator-figure-maker) · [Nexus](https://www.nexusmods.com/animeshopsimulator/mods/82) |
-| **Statue Maker + Statue Shop** | turn any 3D model into a life-size shop statue (app) and the mod that sells it | [GitHub](https://github.com/universesofcyberpunk/anime-shop-simulator-statue-maker) |
+| **Statue Maker + Statue Shop** | turn any 3D model into a life-size shop statue (app) and the mod that sells it | [GitHub](https://github.com/universesofcyberpunk/anime-shop-simulator-statue-maker-) |
 | **Fabianens Mod Market** | MODS screen on the shop computer; API for other mods to list their items | [GitHub](https://github.com/universesofcyberpunk/anime-shop-simulator-mod-market) · [Nexus](https://www.nexusmods.com/animeshopsimulator/mods/31) |
 | **Mod Manager** | build / test / package / publish state of all your mods (tool for modders) | [GitHub](https://github.com/universesofcyberpunk/anime-shop-simulator-mod-manager) |
 | **Video TV** | wall TVs that play your own videos | [GitHub](https://github.com/universesofcyberpunk/anime-shop-simulator-video-tv) · [Nexus](https://www.nexusmods.com/animeshopsimulator/mods/90) |
