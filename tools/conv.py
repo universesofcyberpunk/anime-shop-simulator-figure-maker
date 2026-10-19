@@ -10,9 +10,27 @@ FLIP = np.diag([-1.0, 1, 1, 1])
 
 class Src(gl.G):
     """gl.G ama dosya yolundan da (glb/gltf) okuyabilir"""
-    def __init__(self, path):
+    def __init__(self, path, exclude=None):
+        """exclude: heykele alinmayacak parcalar (materyal sirasi, materyalsiz = -1); None -> otomatik (gorunmeyen / efekt)"""
         if path.lower().endswith('.zip'):
-            super().__init__(path); return
+            super().__init__(path)
+        else:
+            self._load(path)
+        self._prims = [list(me['primitives']) for me in self.j.get('meshes', [])]   # set_exclude hep bunlardan baslar
+        self.auto_exclude = invisible_parts(self.j)
+        self.set_exclude(self.auto_exclude if exclude is None else exclude)
+        self.merged = merge_split_clips(self.j)
+
+    def set_exclude(self, keys):
+        """parcalari ac / kapat (on izlemede tikla kapat); kapali parca ne cizilir ne boya / ortalamaya girer"""
+        keys = {int(k) for k in keys}
+        for me, prs in zip(self.j.get('meshes', []), self._prims):
+            me['primitives'] = [pr for pr in prs if part_key(pr) not in keys]
+        self.exclude = keys
+        mats = self.j.get('materials', [])
+        self.dropped = [mat_name(mats, k) for k in sorted(keys)]
+
+    def _load(self, path):
         d = os.path.dirname(path)
         self.license = ''
         lp = os.path.join(d, 'license.txt')
@@ -44,6 +62,90 @@ class Src(gl.G):
         bv = self.j['bufferViews'][img['bufferView']]
         o = bv.get('byteOffset', 0)
         return self.bufs[bv.get('buffer', 0)][o:o + bv['byteLength']], img.get('name', 'img%d' % src)
+
+
+def _mat_alpha(m):
+    """(gorunur mu, dokulu mu): BLEND/MASK materyalin ana renk alfasi"""
+    pb = m.get('pbrMetallicRoughness', {}); sg = m.get('extensions', {}).get('KHR_materials_pbrSpecularGlossiness')
+    bc = (sg.get('diffuseFactor') if sg else pb.get('baseColorFactor')) or [1, 1, 1, 1]
+    textured = (sg.get('diffuseTexture') if sg else pb.get('baseColorTexture')) is not None
+    return float(bc[3]) if len(bc) > 3 else 1.0, textured
+
+
+def part_key(pr):
+    m = pr.get('material'); return -1 if m is None else int(m)
+
+
+def mat_name(mats, k):
+    return 'default' if k < 0 or k >= len(mats) else (mats[k].get('name') or 'mat%d' % k)
+
+
+def invisible_parts(j):
+    """otomatik kapatilan parcalar (sinirlari / boyu bozmasinlar): saydam modda ana renk alfasi ~0 olanlar ve dokusu kaybolmus
+    efekt kartlari (dokusuz BLEND: alfa < 0.5 ya da varsayilan 0.8 gri; or. oyun modellerindeki lobi isik halkalari, nota isaretleri).
+    Her sey saydamsa bos kume (model bos kalmasin)."""
+    mats = j.get('materials', []); bad = set()
+    for mi, m in enumerate(mats):
+        am = m.get('alphaMode', 'OPAQUE')
+        if am == 'OPAQUE' or 'KHR_materials_transmission' in m.get('extensions', {}): continue
+        a, textured = _mat_alpha(m)
+        bc = (m.get('pbrMetallicRoughness', {}).get('baseColorFactor') or [1, 1, 1, 1])[:3]
+        lost = not textured and all(abs(float(v) - 0.8) < 0.01 for v in bc)    # 0.8 gri: dokusu kaybolmus (Blender varsayilani)
+        if a < 0.02 or (am == 'MASK' and a < float(m.get('alphaCutoff', 0.5))) or (am == 'BLEND' and not textured and (a < 0.5 or lost)):
+            bad.add(mi)
+    used = {part_key(pr) for me in j.get('meshes', []) for pr in me['primitives'] if pr.get('mode', 4) == 4}
+    if not (used - bad): return set()
+    return bad & used
+
+
+def parts_info(g):
+    """formdaki parca listesi: materyal basina [key, ad, ucgen, otomatik kapali mi, uzak mi]. Uzak: dinlenme pozunda en buyuk
+    gorunur parcanin (govde) kutusuna (yarisi kadar genisletilmis) hic degmeyen parca (arka plan levhasi, kopuk efekt) - sadece isaret."""
+    keep = set(g.exclude); g.set_exclude(set())
+    try:
+        tris, box = {}, {}
+        for (mi, P, N, U, I) in posed_geometry(g, [gl.node_local(n) for n in g.j.get('nodes', [])]):
+            k = -1 if mi is None else int(mi)
+            tris[k] = tris.get(k, 0) + len(I) // 3
+            lo, hi = P.min(0), P.max(0)
+            if k in box: lo, hi = np.minimum(lo, box[k][0]), np.maximum(hi, box[k][1])
+            box[k] = (lo, hi)
+    finally:
+        g.set_exclude(keep)
+    vis = [k for k in tris if k not in g.auto_exclude] or list(tris)
+    main = max(vis, key=lambda k: tris[k])
+    lo, hi = box[main]; pad = 0.5 * float((hi - lo).max())
+    lo, hi = lo - pad, hi + pad
+    mats = g.j.get('materials', []); res = []
+    for k in sorted(tris, key=lambda k: -tris[k]):
+        a, b = box[k]
+        far = bool(np.any(b < lo) or np.any(a > hi))
+        res.append([k, mat_name(mats, k), tris[k], k in g.auto_exclude, far])
+    return res
+
+
+def merge_split_clips(j):
+    """Sketchfab / Unity ciktilarinda bir animasyon kemik kemik bolunur: "Govde|Come|Base Layer", "Bone_Bow01|Come|Base Layer" ...
+    Ayni ortadaki ada sahip parcalari tek animasyonda birlestirir (yoksa secilmeyen parcalar - silah, sac - dinlenme pozunda kalir).
+    Birlestirilen animasyon adlari doner."""
+    anims = j.get('animations', [])
+    groups = {}
+    for k, an in enumerate(anims):
+        parts = (an.get('name') or '').split('|')
+        if len(parts) < 3: return []
+        groups.setdefault('|'.join(parts[1:-1]), []).append(k)
+    if len(groups) == len(anims): return []
+    new = []
+    for name, ks in groups.items():
+        samplers, channels = [], []
+        for k in ks:
+            an = anims[k]; o = len(samplers)
+            samplers += an['samplers']
+            for ch in an['channels']:
+                c = dict(ch); c['sampler'] = ch['sampler'] + o; channels.append(c)
+        new.append({'name': name, 'samplers': samplers, 'channels': channels})
+    j['animations'] = new
+    return [n for n, ks in groups.items() if len(ks) > 1]
 
 
 def safe(s):
@@ -447,6 +549,8 @@ def detect_up(g):
         return ax, 'skeleton'
     try: e, b = _shape(g)
     except Exception: return 'Y', 'no geometry'
+    # Y boyunca belirgin uzun model zaten ayakta: sirt / pelerin gibi duz yuzeyler "Z tarafinda kaide" sanilmasin (Boa Hancock)
+    if e[1] >= 1.4 * max(e[0], e[2]): return 'Y', 'tall along Y, kept'
     zb = max(b['Z'], b['-Z'])
     sign = '-Z' if b['Z'] > 2 * b['-Z'] and b['Z'] > 0.08 else 'Z'      # kaide +Z ucundaysa bas -Z'de
     if zb > 0.15 and zb > 3 * b['-Y']: return sign, 'base on Z side'
@@ -494,9 +598,9 @@ def load_override(path):
     return res
 
 
-def convert_anim(src, outdir, clips, height=None, size=None, maxtex=2048, fps=30.0, bounds_clip=0, geo_override=None, up='Y'):
+def convert_anim(src, outdir, clips, height=None, size=None, maxtex=2048, fps=30.0, bounds_clip=0, geo_override=None, up='Y', exclude=None):
     """clips: list of (anim index, display name); up: modelin yukari ekseni (detect_up), 'Y' = oldugu gibi"""
-    g = Src(src); j = g.j
+    g = Src(src, exclude); j = g.j
     apply_up(j, up)
     ovr = load_override(geo_override) if geo_override else None
     if ovr is not None:

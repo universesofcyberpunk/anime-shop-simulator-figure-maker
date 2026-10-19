@@ -37,7 +37,7 @@ using ProductDB = Il2CppProject.Code.Core.Utils.DataDefinition.DataDefinition<Il
 using DefType = Il2CppProject.Code.Gameplay.Definitions.PickupType;
 using NV3 = System.Numerics.Vector3;
 
-[assembly: MelonInfo(typeof(FigureShop.Core), "FigureShop", "1.4.0", "Fabianens")]
+[assembly: MelonInfo(typeof(FigureShop.Core), "FigureShop", "1.4.1", "Fabianens")]
 [assembly: MelonGame("OneMoreTime", "Anime Shop Simulator")]
 
 namespace FigureShop
@@ -155,6 +155,7 @@ namespace FigureShop
             P(typeof(ProductsController), nameof(ProductsController.OnStartServer), nameof(PcPrefix));
             // gorunum: bizim urunler GPU Instancer'a girmesin (yoksa kaynak figurun prototipi cizilir), MeshRenderer ile cizilsin
             P(typeof(PoolService), nameof(PoolService.SetProductInstancing), nameof(ProductInstancingPrefix));
+            P(typeof(PoolService), nameof(PoolService.HandleProductGetFromPool), null, nameof(GetFromPoolPostfix));
             // 1.1.2: figurler rafa ilk konuldugunda fiyatsiz (etiket bos); oyuncu fiyat verince bir daha dokunulmaz
             P(typeof(ProductPlace), nameof(ProductPlace.AddItemServer), null, nameof(AddItemServerPostfix));
             P(typeof(ProductsController), nameof(ProductsController.ChangeProductPriceLogic), null, nameof(PriceChangedPostfix));
@@ -274,7 +275,13 @@ namespace FigureShop
         {
             if (productItem == null || !IsOurs(productItem.gameObject)) return;
             useInstancing = false;
-            if (_spawnQueue.Count < 1024) _spawnQueue.Add(productItem);
+            if (_spawnQueue.Count < 4096) _spawnQueue.Add(productItem);
+        }
+        // 1.4.1 (kayit yukleme): rafa kayittan konan figurler havuzdan alinir ama SetProductInstancing'e hic ugramayabilir;
+        // listeye girmeyince renderer'lari kapali kaliyor, kopya da acilmiyordu (rafta gorunup kaybolma). Havuzdan her alista kuyruga.
+        static void GetFromPoolPostfix(ProductItem productItem)
+        {
+            try { if (productItem != null && IsOurs(productItem.gameObject) && _spawnQueue.Count < 4096) _spawnQueue.Add(productItem); } catch { }
         }
 
         // ana renderer'in kopyasi (ayni mesh ve malzemeler), baslangicta kapali
@@ -323,6 +330,7 @@ namespace FigureShop
         {
             _sceneReady = true;
             _nextCheck = Time.unscaledTime + 3f;
+            OnSceneLoadedDraw();
         }
 
         // Rafta oyun urunun kendi renderer'ini kapatir (GPUI cizsin diye). Bizim urunler GPUI'de olmadigi icin o an kopyayi gosteriyoruz.
@@ -340,16 +348,25 @@ namespace FigureShop
         static readonly List<ProductItem> _spawnQueue = new();
         static readonly List<(ProductItem pi, float until)> _retry = new();
         static float _nextScan, _nextRetry;
+        // 1.4.1 (kayit yukleme): sahne yuklenince 3 / 8 / 15 / 30 / 60 sn'de ek taramalar (kayittan gelen figurler kacmasin), sonra 120 sn'de bir.
+        static readonly float[] LoadScans = { 3f, 8f, 15f, 30f, 60f };
+        static float _sceneLoadedAt = -1f;
+        static int _loadScanStep = LoadScans.Length, _verifyCursor, _scanAddLogs;
+        static void OnSceneLoadedDraw()
+        {
+            _sceneLoadedAt = Time.unscaledTime; _loadScanStep = 0;
+            _nextScan = _sceneLoadedAt + LoadScans[0];
+        }
         static void SyncDrawCopies()
         {
             if (!_built) return;
             float now = Time.unscaledTime;
             if (now >= _nextScan)
             {
-                // yedek tarama: 120 sn'de bir ve sadece listede olmayan figurler eklenir (eskiden 30 sn'de bir her sey silinip
-                // bastan kuruluyordu). Yeni / havuzdan gelen figurler zaten SetProductInstancing kuyrugundan gelir.
-                _nextScan = now + 120f;
-                _spawnQueue.Clear(); _retry.Clear();
+                // yedek tarama: sadece listede olmayan figurler eklenir. Yeni / havuzdan gelen figurler zaten kuyruktan gelir.
+                _nextScan = _loadScanStep < LoadScans.Length - 1 ? _sceneLoadedAt + LoadScans[++_loadScanStep] : now + 120f;
+                if (_loadScanStep >= LoadScans.Length - 1) _loadScanStep = LoadScans.Length;
+                int added = 0;
                 _drawnPtrs.Clear();
                 for (int i = 0; i < _drawn.Count; i++) _drawnPtrs.Add(_drawn[i].Item.Pointer);
                 foreach (var o in UnityEngine.Object.FindObjectsByType(Il2CppType.Of<ProductItem>(), FindObjectsSortMode.None))
@@ -359,35 +376,38 @@ namespace FigureShop
                     int hint = 0; try { hint = pi._definitionIdHint; } catch { }
                     if (hint != 0 && !_ourProductIds.Contains(hint)) continue;
                     if (hint == 0 && !IsOurs(pi.gameObject)) continue;
-                    TryAddDrawn(pi);
+                    if (TryAddDrawn(pi)) added++;
                 }
+                if (added > 0 && _scanAddLogs++ < 10) Log.Msg($"Draw scan: {added} figure(s) were missing from the draw list, added ({_drawn.Count} tracked)");
             }
-            else
+            // kuyruk her karede islenir (eskiden tarama karesinde siliniyordu)
+            if (_spawnQueue.Count > 0)
             {
-                if (_spawnQueue.Count > 0)
+                for (int i = 0; i < _spawnQueue.Count; i++)
                 {
-                    for (int i = 0; i < _spawnQueue.Count; i++)
-                    {
-                        var pi = _spawnQueue[i];
-                        try { if (pi != null && !pi.WasCollected && !TryAddDrawn(pi)) _retry.Add((pi, now + 10f)); } catch { }
-                    }
-                    _spawnQueue.Clear();
+                    var pi = _spawnQueue[i];
+                    try { if (pi != null && !pi.WasCollected && !TryAddDrawn(pi)) _retry.Add((pi, now + 30f)); } catch { }
                 }
-                if (_retry.Count > 0 && now >= _nextRetry)
+                _spawnQueue.Clear();
+            }
+            if (_retry.Count > 0 && now >= _nextRetry)
+            {
+                _nextRetry = now + 0.5f;
+                for (int i = _retry.Count - 1; i >= 0; i--)
                 {
-                    _nextRetry = now + 0.5f;
-                    for (int i = _retry.Count - 1; i >= 0; i--)
-                    {
-                        var (pi, until) = _retry[i];
-                        bool done = true;
-                        try { done = pi == null || pi.WasCollected || TryAddDrawn(pi) || now > until; } catch { }
-                        if (done) _retry.RemoveAt(i);
-                    }
+                    var (pi, until) = _retry[i];
+                    bool done = true;
+                    try { done = pi == null || pi.WasCollected || TryAddDrawn(pi) || now > until; } catch { }
+                    if (done) _retry.RemoveAt(i);
                 }
             }
             // kopya ana renderer'in alt objesi: ikisinin kontrolu yeter. Yok edilenler listeden cikar.
-            // Kopyanin acik/kapali durumu listede tutulur (onu sadece biz degistiriyoruz), her karede okunmaz.
-            for (int i = _drawn.Count - 1; i >= 0; i--)
+            // Kopyanin acik/kapali durumu listede tutulur; 1.4.1: oyun kopyayi da kapatabildigi icin her karede 16 kaydin gercek durumu kontrol edilir.
+            int n = _drawn.Count, verify = Math.Min(16, n);
+            if (_verifyCursor >= n) _verifyCursor = 0;
+            int vFrom = _verifyCursor, vTo = _verifyCursor + verify;
+            _verifyCursor = vTo;
+            for (int i = n - 1; i >= 0; i--)
             {
                 var d = _drawn[i];
                 try
@@ -395,6 +415,11 @@ namespace FigureShop
                     if (d.Main.WasCollected || d.Copy.WasCollected) { _drawn.RemoveAt(i); continue; }
                     bool want = (!d.Main.enabled || d.Main.forceRenderingOff) && !d.Item._isInsideBox;
                     if (d.On != want) { d.On = want; d.Copy.enabled = want && !CopyCulled(d); }
+                    else if ((i >= vFrom && i < vTo) || i < vTo - n)
+                    {
+                        bool show = want && !CopyCulled(d);
+                        if (d.Copy.enabled != show) d.Copy.enabled = show;
+                    }
                 }
                 catch { _drawn.RemoveAt(i); }
             }

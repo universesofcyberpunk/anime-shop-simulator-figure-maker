@@ -210,6 +210,9 @@ STRINGS = {
         'sec_licence': 'Licence', 'lic_default': 'Fabi Figures (default)', 'lic_own': 'My own licence',
         'l_name': 'Licence name in English', 'l_tr': 'Licence name in Turkish', 'l_price': 'Licence price',
         'l_level': 'Licence level', 'l_logo': 'Licence logo (PNG)', 'btn_browse': 'Browse…',
+        'sec_parts': 'Parts', 'col_part': 'Part', 'col_tris': 'Triangles', 'col_note': 'Note',
+        'parts_hint': 'Click a part to leave it out of the figure (or take it back). Left-out parts are not drawn and do not count for the size.',
+        'pt_auto': 'invisible / effect', 'pt_far': 'far from the body', 'pt_off': 'left out', 'btn_parts_auto': 'Automatic',
         'req_note': 'Needs FigureShop 1.3+ and Fabianens Mod Market 1.4+ in the game. The licence and the figures are sold on the MODS screen.',
         'btn_create': 'Create', 'btn_save': 'Save', 'btn_cancel': 'Cancel', 'btn_continue': 'Continue',
         'lic_all_title': 'Licence for all figures', 'btn_licence': 'Licence for all…', 'lic_current': 'Licence: {name}',
@@ -258,6 +261,9 @@ STRINGS = {
         'sec_licence': 'Lisans', 'lic_default': 'Fabi Figures (varsayılan)', 'lic_own': 'Kendi lisansım',
         'l_name': 'Lisansın İngilizce adı', 'l_tr': 'Lisansın Türkçe adı', 'l_price': 'Lisans fiyatı',
         'l_level': 'Lisans seviyesi', 'l_logo': 'Lisans logosu (PNG)', 'btn_browse': 'Seç…',
+        'sec_parts': 'Parçalar', 'col_part': 'Parça', 'col_tris': 'Üçgen', 'col_note': 'Not',
+        'parts_hint': 'Bir parçaya tıklayınca figürden çıkarılır (tekrar tıklayınca geri gelir). Çıkarılan parça çizilmez ve boyuta katılmaz.',
+        'pt_auto': 'görünmez / efekt', 'pt_far': 'gövdeden uzak', 'pt_off': 'çıkarıldı', 'btn_parts_auto': 'Otomatik',
         'req_note': 'Oyunda FigureShop 1.3+ ve Fabianens Mod Market 1.4+ gerekir. Lisans ve figürler MODLAR ekranında satılır.',
         'btn_create': 'Oluştur', 'btn_save': 'Kaydet', 'btn_cancel': 'İptal', 'btn_continue': 'Devam',
         'lic_all_title': 'Bütün figürler için lisans', 'btn_licence': 'Herkes için lisans…', 'lic_current': 'Lisans: {name}',
@@ -525,19 +531,22 @@ def form(d, anims, title_name='', save=False, parent=None, licence_only=False, p
         for w in own_w: w.state(['!disabled'] if own.get() else ['disabled'])
     own.trace_add('write', sync_own); sync_own()
 
-    note = ttk.Label(fr, style='Sub.TLabel', wraplength=int(470 * ui_scale())); note.grid(row=3, column=0, sticky='w', pady=(10, 0))
+    note = ttk.Label(fr, style='Sub.TLabel', wraplength=int(470 * ui_scale())); note.grid(row=4, column=0, sticky='w', pady=(10, 0))
     texts.append((note, 'lic_all_note' if licence_only else 'req_note'))
 
     pv = preview_panel(fr, root, prep, anims, v['pose'], upv, UPS, texts, d.get('pose_frame', 0)) if prep is not None and not licence_only else None
-    if pv: pv['frame'].grid(row=1, column=1, rowspan=3, sticky='n', padx=(16, 0), pady=(12, 0))
+    if pv: pv['frame'].grid(row=1, column=1, rowspan=4, sticky='n', padx=(16, 0), pady=(12, 0))
+    parts = parts_panel(fr, prep, d, texts, pv) if prep is not None and not licence_only and prep.get('parts') else None
+    if parts: parts['frame'].grid(row=3, column=0, sticky='we', pady=(12, 0))
 
     def ok(_e=None):
         res.update({k: x.get().strip() for k, x in v.items()}); res['own'] = own.get()
         res['up'] = upv.get() if upv.get() in UPS else 'auto'
         if pv and pv['state']['manual']: res['orient'] = [float(x) for x in pv['state']['R'].ravel()]
         if pv: res['pose_frame'] = pv['frame_of'](res['pose'])
+        if parts: res['exclude'] = sorted(parts['off'])
         root.destroy()
-    bf = ttk.Frame(fr); bf.grid(row=4, column=0, columnspan=2, sticky='e', pady=(14, 0))
+    bf = ttk.Frame(fr); bf.grid(row=5, column=0, columnspan=2, sticky='e', pady=(14, 0))
     cb = ttk.Button(bf, command=root.destroy); cb.pack(side='right')
     okb = ttk.Button(bf, command=ok, style='Accent.TButton'); okb.pack(side='right', padx=(0, 8))
     texts += [(cb, 'btn_cancel'), (okb, 'btn_continue' if licence_only else 'btn_save' if save else 'btn_create')]
@@ -551,12 +560,69 @@ def form(d, anims, title_name='', save=False, parent=None, licence_only=False, p
         if upv.get() not in UPS: upv.set(T('up_auto'))
         upbox['values'] = [T('up_auto')] + UPS
         if pv: pv['retext']()
+        if parts: parts['retext']()
     i.watch(retext)
     center(root, parent); bring_front(root); (rb1 if licence_only else first).focus_set()
     if parent is not None: root.grab_set()
     master.wait_window(root)
     i.unwatch(retext)
     return res or None
+
+
+def parts_panel(fr, prep, d, texts, pv):
+    """modelin parcalari (materyal basina): tikla -> figure alinmaz / geri alinir. Otomatik kapatilanlar (gorunmez / efekt) ve
+    govdeden uzak parcalar notta yazar. Degisince on izleme yeniden cizilir."""
+    import tkinter as tk
+    from tkinter import ttk
+    g = prep['g']; info = prep['parts']
+    off = set(int(k) for k in (d.get('exclude') if d.get('exclude') is not None else g.auto_exclude))
+    box = ttk.LabelFrame(fr, padding=(12, 8), style='Section.TLabelframe'); box.columnconfigure(0, weight=1)
+    hint = ttk.Label(box, style='Sub.TLabel', wraplength=int(450 * ui_scale()), justify='left'); hint.grid(row=0, column=0, columnspan=2, sticky='w')
+    tv = ttk.Treeview(box, columns=('on', 'name', 'tris', 'note'), show='headings', height=min(5, max(3, len(info))), selectmode='none')
+    sc = ui_scale()
+    for c, w, anc in (('on', 30, 'center'), ('name', 230, 'w'), ('tris', 70, 'e'), ('note', 120, 'w')):
+        tv.column(c, width=int(w * sc), anchor=anc, stretch=c == 'name')
+    sb = ttk.Scrollbar(box, orient='vertical', command=tv.yview); tv.configure(yscrollcommand=sb.set)
+    tv.grid(row=1, column=0, sticky='we', pady=(6, 0)); sb.grid(row=1, column=1, sticky='ns', pady=(6, 0))
+    tv.tag_configure('off', foreground='#9aa0a8')
+    bauto = ttk.Button(box); bauto.grid(row=2, column=0, columnspan=2, sticky='e', pady=(6, 0)); texts.append((bauto, 'btn_parts_auto'))
+    texts.append((hint, 'parts_hint'))
+
+    def fill():
+        tv.delete(*tv.get_children())
+        for k, name, tris, auto, far in info:
+            notes = [T('pt_auto')] if auto else []
+            if far: notes.append(T('pt_far'))
+            if k in off and not auto: notes.append(T('pt_off'))
+            tv.insert('', 'end', iid=str(k), values=('—' if k in off else '✔', name, fmt_num(tris), ', '.join(notes)),
+                      tags=('off',) if k in off else ())
+        for c, key in (('on', ''), ('name', 'col_part'), ('tris', 'col_tris'), ('note', 'col_note')):
+            tv.heading(c, text=T(key) if key else '')
+
+    def apply():
+        if len(off) >= len(info): return False                 # en az bir parca kalsin
+        g.set_exclude(off); fill()
+        if pv: pv['reload']()
+        return True
+
+    def click(e):
+        row = tv.identify_row(e.y)
+        if not row or tv.identify_region(e.x, e.y) not in ('cell', 'tree'): return
+        k = int(row)
+        if k in off: off.discard(k); apply()
+        else:
+            off.add(k)
+            if not apply(): off.discard(k)
+    tv.bind('<ButtonRelease-1>', click)
+
+    def auto():
+        off.clear(); off.update(g.auto_exclude); apply()
+    bauto.config(command=auto)
+
+    def retext():
+        box.config(text=T('sec_parts')); fill()
+    g.set_exclude(off)
+    return dict(frame=box, off=off, retext=retext)
 
 
 def preview_panel(fr, root, prep, anims, posevar, upv, UPS, texts, frame0=0):
@@ -579,7 +645,7 @@ def preview_panel(fr, root, prep, anims, posevar, upv, UPS, texts, frame0=0):
     bts = ttk.Frame(box); bts.pack(fill='x')
     g = prep['g']
     st = dict(R=np.eye(3), manual=False, pts=None, drag=None, live=None, photo=None, busy=False, want=None, pending=False,
-              tex={}, timer=None)
+              tex={}, timer=None, ver=0)
     def cur_up(): return upv.get() if upv.get() in UPS else 'auto'
 
     def frames_of(k):                                       # model.skin ile ayni kare sayisi (30 fps)
@@ -615,7 +681,7 @@ def preview_panel(fr, root, prep, anims, posevar, upv, UPS, texts, frame0=0):
 
     def load():
         """noktalari arka planda hazirla (buyuk dokularda bir iki saniye surer), sonra ciz"""
-        k = pose_index(); f = frame_of(posevar.get()); key = (k, f)
+        k = pose_index(); f = frame_of(posevar.get()); key = (k, f, st['ver'])
         if st['busy']: st['want'] = key; return
         st['busy'] = True; st['want'] = None
         if st['pts'] is None: img.config(image=blank, text=T('pv_loading'))   # kare degisirken eski resim kalsin
@@ -700,7 +766,9 @@ def preview_panel(fr, root, prep, anims, posevar, upv, UPS, texts, frame0=0):
         if st['pts'] is None: img.config(text=T('pv_loading'))
     setup_scale(frame0)
     root.after(50, load)
-    return dict(frame=box, state=st, retext=retext, frame_of=frame_of)
+    def reload():                                            # parca acilip kapaninca: yeni nokta bulutu, otomatik yon yeniden
+        st['ver'] += 1; load()
+    return dict(frame=box, state=st, retext=retext, frame_of=frame_of, reload=reload)
 
 
 def run_busy(fn, text_key, name, parent=None):
@@ -736,8 +804,15 @@ def num(s, d):
     except Exception: return d
 
 
-VERSION = '1.3.1'
+VERSION = '1.4.0'
 MODEL_TYPES = ('.glb', '.gltf', '.fbx', '.obj', '.blend', '.zip')
+
+
+def default_pose(anims):
+    """varsayilan poz: bekleme animasyonu (idle / stand / wait); oyun modellerinin ilk animasyonu cogu zaman giris
+    hareketidir ("Come": silah havada ucar)"""
+    if not anims: return '-'
+    return next((n for n in anims if re.search(r'idle|stand|wait|breath', n, re.I)), anims[0])
 
 
 def prepare(model, a, work_key=None):
@@ -756,11 +831,18 @@ def prepare(model, a, work_key=None):
     if not lic and os.path.exists(os.path.join(work, 'license.txt')): lic = open(os.path.join(work, 'license.txt'), encoding='utf-8', errors='ignore').read()
 
     base = pretty(info['title']) if info['title'] else pretty(stem)
-    opt = dict(folder=folder_name(a.name or base), en=a.en or base, tr=a.tr or a.en or base, pose=a.pose or (anims[0] if anims else '-'),
+    opt = dict(folder=folder_name(a.name or base), en=a.en or base, tr=a.tr or a.en or base, pose=a.pose or default_pose(anims),
                price=a.price, boxed_price=a.boxed_price, lic_name=a.licence or '', lic_tr=a.licence_tr or '',
                lic_price=a.licence_price, lic_level=a.licence_level, lic_logo=a.licence_logo or '', up=getattr(a, 'up', None) or 'auto',
                pose_frame=int(round(max(a.pose_time or 0.0, 0.0) * 30.0)))
-    return dict(model=model, stem=stem, work=work, src=src, g=g, anims=anims, info=info, lic=lic, base=base, opt=opt)
+    parts = conv.parts_info(g)
+    excl = set(g.exclude)
+    def match(spec):                                    # --hide / --show: virgulle ayrilmis materyal adlari (parcasi da olur)
+        ws = [w.strip().lower() for w in (spec or '').split(',') if w.strip()]
+        return {pt[0] for pt in parts if any(w in pt[1].lower() for w in ws)}
+    excl = (excl | match(getattr(a, 'hide', None))) - match(getattr(a, 'show', None))
+    opt['exclude'] = sorted(excl)
+    return dict(parts=parts, model=model, stem=stem, work=work, src=src, g=g, anims=anims, info=info, lic=lic, base=base, opt=opt)
 
 
 def build(p, opt, a, folder=None):
@@ -770,6 +852,8 @@ def build(p, opt, a, folder=None):
     out = os.path.join(BASE, 'out', folder)
     shutil.rmtree(out, True); os.makedirs(out)
 
+    excl = set(int(k) for k in (opt.get('exclude') if opt.get('exclude') is not None else g.auto_exclude))
+    g.set_exclude(excl)                                 # formda kapatilan / otomatik kapatilan parcalar
     clips = []
     if anims and opt['pose'] != '-':
         idx = next((k for k, n in enumerate(anims) if n == opt['pose']), next((k for k, n in enumerate(anims) if opt['pose'].lower() in n.lower()), 0))
@@ -779,6 +863,8 @@ def build(p, opt, a, folder=None):
     tris = tri_count(g)
     if tris == 0: raise FMError('err_no_mesh')
     log(f'{tris} ucgen, animasyonlar: {anims[:10] or "-"}; poz: {clips[0][1] + f" (kare {frame})" if clips else "dinlenme pozu"}')
+    if g.dropped: log(f'figure alinmayan parcalar ({len(g.dropped)}): {", ".join(g.dropped[:6])}' + (' ...' if len(g.dropped) > 6 else ''))
+    if getattr(g, 'merged', None): log(f'parcali animasyonlar birlestirildi: {", ".join(g.merged[:6])}')
 
     orient_m = np.array(opt['orient'], float).reshape(3, 3) if opt.get('orient') else None   # on izlemede elle cevrildi
     up = str(opt.get('up') or 'auto').upper().replace('+', '')
@@ -787,7 +873,7 @@ def build(p, opt, a, folder=None):
     else: how = 'manual'
     log(f'yukari ekseni: {up} ({how})' + ('' if up == 'Y' else ' -> ayaga kaldirildi'))
 
-    r = conv.convert_anim(src, out, clips, up=orient_m if orient_m is not None else up)
+    r = conv.convert_anim(src, out, clips, up=orient_m if orient_m is not None else up, exclude=excl)
     if r['tris'] > a.budget * 1.1:
         before, after = standalone.decimate_skin(os.path.join(out, 'model.skin'), a.budget)
         log(f'poligon azaltildi: {before} -> {after} ucgen'); r['tris'] = after
@@ -822,7 +908,7 @@ def build(p, opt, a, folder=None):
         'licence': licence,
         'requires': {'FigureShop': '1.3.3' if frame else '1.3.0', 'ModMarket': '1.4.0'},
         'credits': info,
-        'maker': {'tool': 'Figure Maker ' + VERSION, 'tris': r['tris'], 'parts': r['parts'], 'up': up, 'facing': how_front},
+        'maker': {'tool': 'Figure Maker ' + VERSION, 'tris': r['tris'], 'parts': r['parts'], 'up': up, 'facing': how_front, 'hiddenParts': g.dropped},
     }
     json.dump(fj, open(os.path.join(out, 'figure.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
 
@@ -1220,6 +1306,8 @@ def main():
     ap.add_argument('--budget', type=int, default=60000); ap.add_argument('--yaw', type=float, default=25.0)
     ap.add_argument('--up', default='auto', help='modelin yukari ekseni: auto (bul), Y (oldugu gibi), Z, -Z, X, -X, -Y')
     ap.add_argument('--price', type=float, default=0.0); ap.add_argument('--boxed-price', type=float, default=0.0)
+    ap.add_argument('--hide', help='figure alinmayacak parcalar: virgulle ayrilmis materyal adlari (adin bir kismi da olur)')
+    ap.add_argument('--show', help='otomatik kapatilan parcalardan geri alinacaklar (ayni bicim)')
     ap.add_argument('--install', action='store_true', help='UserData/FigureShop icine de kopyala')
     ap.add_argument('--form', action='store_true', help='figur / lisans formunu ac')
     ap.add_argument('--no-form', action='store_true', help='formu acma (komut satiri)')
